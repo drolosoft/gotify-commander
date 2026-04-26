@@ -1,0 +1,83 @@
+# gotify-commander configuration
+# Edit in Gotify WebUI -> Plugins -> gotify-commander -> Configure
+
+gotify:
+  server_url: "http://localhost:2006"
+  base_url: "https://gotify.example.com"   # public URL used in web UI links and cert checks
+  client_token: "your-gotify-client-token"
+  command_app_id: 1
+  response_app_token: "your-response-app-token"
+
+defaults:
+  timeout: 30s
+  log_lines: 30
+
+# SSH targets for remote machines (optional)
+ssh_targets:
+  mac:
+    host: "100.x.x.x"          # Tailscale IP recommended
+    port: 22
+    user: "admin"
+    key_file: "/home/admin/.ssh/id_rsa"
+
+# Service categories — drives grouping in 'services' command and web UI
+# Add your own or rename labels; types are: web, media, monitoring, data, automation, system
+categories:
+  web:
+    label: "Web"
+    type: web
+  media:
+    label: "Media"
+    type: media
+  monitoring:
+    label: "Monitoring"
+    type: monitoring
+  data:
+    label: "Data"
+    type: data
+  automation:
+    label: "Automation"
+    type: automation
+  system:
+    label: "System"
+    type: system
+
+# Services you want to manage
+# Each service needs: description, category, machine, and either systemd or launchd
+services:
+  nginx:
+    description: "Web Server"
+    domain: "example.com"       # used by 'cert' and 'dns' commands
+    machine: vps
+    port: 80
+    aliases: [ng, web]
+    systemd: nginx
+
+  myapp:
+    description: "My Application"
+    domain: "app.example.com"
+    machine: vps
+    port: 3000
+    aliases: [app]
+    systemd: myapp
+
+  grafana:
+    description: "Grafana"
+    machine: vps
+    port: 3001
+    aliases: [graf, metrics]
+    systemd: grafana
+
+  homeserver:
+    description: "Home Server"
+    machine: mac
+    port: 8080
+    aliases: [home]
+    launchd: com.myapp.service
+
+# GPS locate configuration (optional)
+# locate:
+#   devices:
+#     phone:
+#       type: findmy
+#       name: "My iPhone"

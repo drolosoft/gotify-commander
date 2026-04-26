@@ -1,0 +1,55 @@
+# Plugin binary
+*.so
+*.dylib
+
+# Compiled binary
+gotify-commander
+
+# Build artifacts
+bin/
+dist/
+
+# Go
+*.test
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+__debug_bin*
+
+# Temporary
+*.tmp
+
+# Coverage
+coverage.out
+
+# Private config (never publish)
+config.local.yaml
+commander.yaml
+
+# Dev files (mock data, not needed in repo)
+dev.html
+
+# Web UI (generated/embedded asset, built separately)
+ui.html
+
+# Embedded assets (base64 in ui.html, raw files not needed)
+favicon.ico
+apple-touch-icon.png
+
+# Private
+CLAUDE.md
+.claude/
+.superpowers/
+docs/superpowers/
