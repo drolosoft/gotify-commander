@@ -1778,11 +1778,9 @@ function showServicePanel(panel, cmd) {
     html += '<div class="chip-wrap">';
     for (var s = 0; s < svcs.length; s++) {
       var sv = svcs[s];
-      var portLabel = sv.port ? " :" + sv.port : "";
       html += '<button class="svc-chip" data-cmd="' + esc(cmd) + '" data-svc="' + esc(sv.name) + '">';
       if (sv.domain) html += '<img class="svc-favicon" src="https://' + esc(sv.domain) + '/favicon.ico" alt="" onerror="this.style.display=\'none\'">';
-      html += esc(sv.name);
-      if (portLabel) html += ' <span class="port">' + esc(portLabel) + "</span>";
+      html += esc(sv.desc || sv.name);
       html += "</button>";
     }
     html += "</div></div>";
