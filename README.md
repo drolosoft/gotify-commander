@@ -13,6 +13,12 @@
 
 Every existing Gotify plugin is one-way — forward to Telegram, Slack, or email. gotify-commander closes the loop: type a command on your phone, get the result as a notification. No bots, no third-party services, no new infrastructure.
 
+<p align="center">
+  <img src="assets/iphone-dark.png" alt="iPhone — restart service" width="280">
+  &nbsp;&nbsp;
+  <img src="assets/android-light.png" alt="Android — machine commands" width="280">
+</p>
+
 ---
 
 ## How It Works
@@ -44,6 +50,8 @@ Commands and responses flow through a **single unified Gotify app** — no separ
 
 ## Quick Start
 
+<p align="center"><img src="assets/commander-online.png" alt="Commander Online notification" width="500"></p>
+
 1. Download the `.so` for your architecture from [Releases](../../releases)
 2. Drop it in Gotify's plugin directory (usually `/opt/gotify/data/plugins/`)
 3. Restart Gotify: `sudo systemctl restart gotify`
@@ -56,6 +64,11 @@ Access the web control panel at `https://your-gotify-domain/plugin/gotify-comman
 ---
 
 ## Command Reference
+
+<details>
+<summary>📸 Help output (click to expand)</summary>
+<p align="center"><img src="assets/help-dark.png" alt="Help command output" width="400"></p>
+</details>
 
 ### Service Management
 
@@ -97,7 +110,12 @@ Access the web control panel at `https://your-gotify-domain/plugin/gotify-comman
 
 | Command | Args | Description |
 |---------|------|-------------|
-| `help` | -- | Show all commands and configured services |
+| `help` |
+
+<details>
+<summary>📸 GPS Locate result</summary>
+<p align="center"><img src="assets/location.png" alt="GPS locate with map" width="400"></p>
+</details> -- | Show all commands and configured services |
 | `ping` | `[vps\|mac]` | Health check — responds with "pong" + latency |
 | `version` | -- | gotify-commander version + Go runtime info |
 
@@ -108,6 +126,8 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
 ---
 
 ## Web UI Control Panel
+
+<p align="center"><img src="assets/plugin-config.png" alt="Gotify plugin config and status" width="700"></p>
 
 A browser dashboard built with **Pico CSS** lives at `https://your-domain/plugin/gotify-commander/`.
 
