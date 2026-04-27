@@ -151,7 +151,7 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
 
 ## Web UI Control Panel
 
-<p align="center"><img src="assets/plugin-config.png" alt="Gotify plugin config and status" width="700"></p>
+<p align="center"><img src="assets/web-ui.png" alt="Web UI Control Panel — commands, tabs, history" width="700"></p>
 
 A browser dashboard built with **Pico CSS** lives at `https://your-domain/plugin/gotify-commander/`.
 
