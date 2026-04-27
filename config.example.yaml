@@ -1,0 +1,80 @@
+# gotify-commander configuration
+# Edit in Gotify WebUI → Plugins → gotify-commander → Configure
+
+gotify:
+  server_url: "http://localhost:2006"
+  base_url: "https://gotify.example.com"     # public URL — shown in help and control panel links
+  client_token: "your-gotify-client-token"    # Clients → Create → copy token
+  command_app_id: 1                           # plugin's own app ID (shown in Plugins page)
+  response_app_token: "your-response-token"
+
+defaults:
+  timeout: 30s
+  log_lines: 30
+
+# SSH targets for remote machines (optional)
+ssh_targets:
+  mac:
+    host: "192.168.1.100"       # Tailscale IP recommended
+    port: 22
+    user: "admin"
+    key_file: "/home/admin/.ssh/id_rsa"
+
+# Categories — define tabs in the web UI control panel
+# type controls what happens when you tap a command button:
+#   machine  → shows VPS/Mac target buttons
+#   service  → shows service list with favicons
+#   direct   → runs immediately (no submenu)
+categories:
+  - label: "🖥️ Machine"
+    type: machine
+    commands: [free, df, uptime, who, top, ports, ip, connections, updates, ping]
+  - label: "🌐 Sites"
+    type: service
+    commands: [restart, stop, start, logs, traffic]
+  - label: "📈 Monitoring"
+    type: direct
+    commands: [status, analytics, certs, services]
+  - label: "⚠️ Danger"
+    type: machine
+    danger: true
+    commands: [reboot, shutdown]
+  - label: "📍 Location"
+    type: direct
+    commands: [locate]
+  - label: "ℹ️ Info"
+    type: direct
+    commands: [help]
+
+# Services you want to manage
+# Each service needs: machine + systemd (for VPS) or launchd (for Mac)
+# Optional: description, domain (for favicons), port, aliases
+services:
+  nginx:
+    description: "Web Server"
+    machine: vps
+    port: 80
+    domain: "example.com"         # enables favicon in web UI
+    aliases: [ng, web]
+    systemd: nginx
+
+  myapp:
+    description: "My Application"
+    machine: vps
+    port: 3000
+    domain: "app.example.com"
+    aliases: [app]
+    systemd: myapp
+
+  redis:
+    description: "Redis"
+    machine: vps
+    port: 6379
+    systemd: redis-server
+
+  homeserver:
+    description: "Home Server"
+    machine: mac
+    port: 8080
+    aliases: [home]
+    launchd: com.homeserver.service
