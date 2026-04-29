@@ -496,7 +496,7 @@ const commandUI = `<!DOCTYPE html>
 [data-theme="light"] .action-card.danger { color: #cf222e; }
 [data-theme="light"] .chip { color: #2d333b; }
 [data-theme="light"] .svc-chip { color: #2d333b !important; }
-[data-theme="light"] .history-toolbar button { color: #2d333b; }
+[data-theme="light"] .history-toolbar a { color: #2d333b; }
 [data-theme="light"] .target-btn { color: #2d333b;   min-height: 44px;
   border-radius: 12px;
 }
@@ -608,6 +608,10 @@ const commandUI = `<!DOCTYPE html>
   min-width: 100%;
   flex-shrink: 0;
   scroll-snap-align: start;
+  background: var(--pico-card-sectioning-background-color);
+  border-radius: 12px;
+  padding: 12px 0;
+  margin: 0 16px;
 }
 
 .category-actions {
@@ -723,6 +727,10 @@ const commandUI = `<!DOCTYPE html>
   min-width: 100%;
   flex-shrink: 0;
   scroll-snap-align: start;
+  background: var(--pico-card-sectioning-background-color);
+  border-radius: 12px;
+  padding: 12px 0;
+  margin: 0 16px;
 }
 
 .category-actions {
@@ -787,6 +795,10 @@ body {
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+}
+
+main.gc-container {
+  padding: 8px 0 !important;
 }
 
 /* ── Header ──────────────────────────────────────────── */
@@ -948,7 +960,7 @@ header.gc-header h1 .icon { font-size: 22px; }
 /* ── Section Labels ────────────────────────────────────── */
 
 .section-label {
-  padding: 14px 16px 8px;
+  padding: 10px 16px 6px;
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
@@ -956,7 +968,6 @@ header.gc-header h1 .icon { font-size: 22px; }
   color: var(--pico-muted-color);
   margin: 0;
   border-left: 3px solid var(--gc-accent);
-  margin-left: 16px;
   padding-left: 10px;
 }
 
@@ -966,18 +977,21 @@ header.gc-header h1 .icon { font-size: 22px; }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(95px, 1fr));
   gap: 8px;
-  margin: 0 16px 6px;
-  padding: 10px;
-  height: 200px;
+  margin: 0 0 6px;
+  padding: 8px;
   align-content: start;
-  background: rgba(0, 0, 0, 0.15);
+  background: rgba(0, 0, 0, 0.08);
   border-radius: 10px;
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3), inset 0 1px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 [data-theme="light"] .card-grid {
-  background: rgba(0, 0, 0, 0.06);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.1), inset 0 1px 2px rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.03);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] .category-section {
+  background: #f0f2f5;
 }
 
 .action-card {
