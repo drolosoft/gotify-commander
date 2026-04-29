@@ -495,6 +495,7 @@ const commandUI = `<!DOCTYPE html>
 [data-theme="light"] .action-card { color: #2d333b; }
 [data-theme="light"] .action-card.danger { color: #cf222e; }
 [data-theme="light"] .chip { color: #2d333b; }
+[data-theme="light"] .svc-chip { color: #2d333b !important; }
 [data-theme="light"] .history-toolbar button { color: #2d333b; }
 [data-theme="light"] .target-btn { color: #2d333b;   min-height: 44px;
   border-radius: 12px;
