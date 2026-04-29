@@ -280,18 +280,8 @@ func (b *Builtins) lookupService(target string) (string, config.Service, bool) {
 	return "", config.Service{}, false
 }
 
-// serviceResponse builds a response for service actions, including a favicon
-// when the service has a domain configured.
+// serviceResponse builds a response for service actions.
 func (b *Builtins) serviceResponse(action, name, machine, portStr, emoji string, svc config.Service) Response {
-	if svc.Domain != "" {
-		msg := fmt.Sprintf("![](https://%s/favicon.ico) %s %sed on %s%s", svc.Domain, name, action, machine, portStr)
-		return Response{
-			Title:    b.title(action) + " " + b.title(name),
-			Message:  msg,
-			Priority: 3,
-			Markdown: true,
-		}
-	}
 	return Response{
 		Title:    b.title(action) + " " + b.title(name),
 		Message:  fmt.Sprintf("%s %s %sed on %s%s", emoji, name, action, machine, portStr),

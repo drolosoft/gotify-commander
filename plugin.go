@@ -1576,6 +1576,7 @@ function appendHistoryDOM(command, title, message, isError, timeStr, prepend) {
   var respDiv = document.createElement("div");
   respDiv.className = "h-resp";
   if (title || message) {
+    respDiv.setAttribute("data-raw", message || "");
     respDiv.innerHTML = '<div class="h-resp-title">' + esc(title) + '</div>' + enrichWithFavicons(message);
   }
 
@@ -1588,6 +1589,19 @@ function appendHistoryDOM(command, title, message, isError, timeStr, prepend) {
     historyList.appendChild(div);
   }
   return div;
+}
+
+function refreshHistoryFavicons() {
+  var resps = historyList.querySelectorAll(".h-resp");
+  for (var i = 0; i < resps.length; i++) {
+    var el = resps[i];
+    var titleEl = el.querySelector(".h-resp-title");
+    var title = titleEl ? titleEl.textContent : "";
+    var raw = el.getAttribute("data-raw");
+    if (raw) {
+      el.innerHTML = '<div class="h-resp-title">' + esc(title) + '</div>' + enrichWithFavicons(raw);
+    }
+  }
 }
 
 function createLoadingEntry(command) {
@@ -1921,6 +1935,7 @@ function loadConfig() {
       configData = data;
       buildCategories(data);
       buildCategoryTabs(data.categories);
+      refreshHistoryFavicons();
     })
     .catch(function() {
       buildCategories(null);
