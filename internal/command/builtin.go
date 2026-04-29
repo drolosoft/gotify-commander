@@ -214,11 +214,7 @@ func (b *Builtins) serviceAction(action, name string, svc config.Service) Respon
 		default:
 			emoji = "✅"
 		}
-		return Response{
-			Title:    b.title(action) + " " + b.title(name),
-			Message:  fmt.Sprintf("%s %s %sed on VPS%s", emoji, name, action, portStr),
-			Priority: 3,
-		}
+		return b.serviceResponse(action, name, "VPS", portStr, emoji, svc)
 
 	case "mac":
 		if b.sshExec == nil {
@@ -261,11 +257,7 @@ func (b *Builtins) serviceAction(action, name string, svc config.Service) Respon
 		default:
 			emoji = "✅"
 		}
-		return Response{
-			Title:    b.title(action) + " " + b.title(name),
-			Message:  fmt.Sprintf("%s %s %sed on Mac%s", emoji, name, action, portStr),
-			Priority: 3,
-		}
+		return b.serviceResponse(action, name, "Mac", portStr, emoji, svc)
 	}
 
 	return errorResponse("Unknown Machine", fmt.Sprintf("unknown machine type for service %q", name))
@@ -286,6 +278,25 @@ func (b *Builtins) lookupService(target string) (string, config.Service, bool) {
 		}
 	}
 	return "", config.Service{}, false
+}
+
+// serviceResponse builds a response for service actions, including a favicon
+// when the service has a domain configured.
+func (b *Builtins) serviceResponse(action, name, machine, portStr, emoji string, svc config.Service) Response {
+	if svc.Domain != "" {
+		msg := fmt.Sprintf("![](https://%s/favicon.ico) %s %sed on %s%s", svc.Domain, name, action, machine, portStr)
+		return Response{
+			Title:    b.title(action) + " " + b.title(name),
+			Message:  msg,
+			Priority: 3,
+			Markdown: true,
+		}
+	}
+	return Response{
+		Title:    b.title(action) + " " + b.title(name),
+		Message:  fmt.Sprintf("%s %s %sed on %s%s", emoji, name, action, machine, portStr),
+		Priority: 3,
+	}
 }
 
 // ─── 4. Restart ──────────────────────────────────────────────────────────────
