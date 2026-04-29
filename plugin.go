@@ -837,6 +837,12 @@ header.gc-header h1 {
   color: var(--pico-color);
   flex: 1;
   text-align: center;
+  overflow: visible;
+  line-height: 1;
+}
+header.gc-header h1 img {
+  display: block;
+  flex-shrink: 0;
 }
 
 header.gc-header h1 .icon { font-size: 22px; }
