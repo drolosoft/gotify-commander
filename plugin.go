@@ -337,9 +337,9 @@ func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
 				{Label: "🖥️ Machine", Type: "machine", Commands: []string{"free", "df", "uptime", "who", "top", "ports", "ip", "connections", "updates", "ping"}},
 				{Label: "🌐 Sites", Type: "service", Commands: []string{"restart", "stop", "start", "logs", "traffic"}},
 				{Label: "📈 Monitoring", Type: "direct", Commands: []string{"status", "analytics", "certs", "services"}},
-				{Label: "⚠️ Danger", Type: "machine", Commands: []string{"reboot", "shutdown"}, Danger: true},
 				{Label: "📍 Location", Type: "direct", Commands: []string{"locate"}},
 				{Label: "ℹ️ Info", Type: "direct", Commands: []string{"help"}},
+				{Label: "⚠️ Danger", Type: "machine", Commands: []string{"reboot", "shutdown"}, Danger: true},
 			}
 		}
 
