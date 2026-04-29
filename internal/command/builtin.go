@@ -795,7 +795,7 @@ func (b *Builtins) Traffic(cmd Command) Response {
 		}
 		// Filter logs for this domain into temp file, then run rhit on it
 		script := fmt.Sprintf(
-			"tmpf=$(mktemp /tmp/rhit-XXXXXX.log) && sudo zcat -f /var/log/nginx/access.log* 2>/dev/null | grep -i '%s' > \"$tmpf\" && sudo rhit \"$tmpf\" --color no -d '%s' --length 10 2>&1 | sed 's/\\x1b\\[[0-9;]*m//g' | grep -v '^$' | grep -v '\\[2K'; rm -f \"$tmpf\"",
+			"tmpf=$(mktemp /tmp/rhit-XXXXXX.log) && sudo zcat -f /var/log/nginx/access.log* 2>/dev/null | grep -i '%s' > \"$tmpf\" && sudo rhit \"$tmpf\" --color no -s 2xx,3xx -d '%s' --length 10 -f date,status,ref 2>&1 | sed 's/\\x1b\\[[0-9;]*m//g' | grep -v '^$' | grep -v '\\[2K'; rm -f \"$tmpf\"",
 			domain, dateRange)
 		result, err := b.exec.Run(ctx, "bash", "-c", script)
 		if err != nil {
@@ -813,7 +813,7 @@ func (b *Builtins) Traffic(cmd Command) Response {
 	}
 
 	// All traffic, last 3 months
-	result, err := b.exec.Run(ctx, "bash", "-c", "sudo rhit /var/log/nginx/ --color no -d '"+dateRange+"' --length 15 2>&1 | sed 's/\\x1b\\[[0-9;]*m//g'")
+	result, err := b.exec.Run(ctx, "bash", "-c", "sudo rhit /var/log/nginx/ --color no -s 2xx,3xx -d '"+dateRange+"' --length 10 -f date,status,ref 2>&1 | sed 's/\\x1b\\[[0-9;]*m//g'")
 	if err != nil {
 		return errorResponse("Traffic Failed", err.Error())
 	}
