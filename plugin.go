@@ -2095,6 +2095,7 @@ function handleTargetClick(e) {
     if (!confirm("Are you sure you want to " + cmd + " " + target + "?")) return;
   }
   executeCommand(fullCmd, btn);
+  collapseAll();
 }
 
 function handleChipClick(e) {
@@ -2104,6 +2105,7 @@ function handleChipClick(e) {
   var fullCmd = cmd + " " + svc;
   cmdInput.value = fullCmd;
   executeCommand(fullCmd, chip);
+  collapseAll();
 }
 
 function toggleCard(cardEl, cmd, panel) {
