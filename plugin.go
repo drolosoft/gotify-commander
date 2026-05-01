@@ -972,6 +972,8 @@ header.gc-header h1 .icon { font-size: 22px; }
 /* ── Categories container ────────────────────────────── */
 #categoriesContainer {
   padding-bottom: 8px;
+  overflow: hidden;
+  transition: height 0.2s ease;
 }
 
 /* ── Section Labels ────────────────────────────────────── */
@@ -1692,10 +1694,26 @@ function buildCategoryTabs(categories) {
         var sec = document.getElementById("cat-section-" + idx);
         if (sec) {
           categoriesContainer.scrollTo({ left: sec.offsetLeft, behavior: "smooth" });
+          setTimeout(resizeContainerToActive, 350);
         }
       });
     })(i);
     tabs.appendChild(tab);
+  }
+}
+
+/* ── Resize container to active section height (mobile) ── */
+function resizeContainerToActive() {
+  if (window.innerWidth > 600) {
+    categoriesContainer.style.height = "";
+    return;
+  }
+  var scrollLeft = categoriesContainer.scrollLeft;
+  var width = categoriesContainer.offsetWidth;
+  var idx = Math.round(scrollLeft / width);
+  var sections = categoriesContainer.querySelectorAll(".category-section");
+  if (sections[idx]) {
+    categoriesContainer.style.height = sections[idx].offsetHeight + "px";
   }
 }
 
@@ -1710,8 +1728,10 @@ categoriesContainer.addEventListener("scroll", function() {
     var allTabs = document.querySelectorAll(".category-tab");
     for (var t = 0; t < allTabs.length; t++) allTabs[t].classList.remove("active");
     if (allTabs[idx]) allTabs[idx].classList.add("active");
+    resizeContainerToActive();
   }, 100);
 }, {passive: true});
+window.addEventListener("resize", resizeContainerToActive);
 
 function removeFromHistoryStorage(idx) {
   try {
@@ -2194,6 +2214,7 @@ function loadConfig() {
       buildCategories(data);
       buildCategoryTabs(data.categories);
       refreshHistoryFavicons();
+      setTimeout(resizeContainerToActive, 100);
     })
     .catch(function() {
       buildCategories(null);
