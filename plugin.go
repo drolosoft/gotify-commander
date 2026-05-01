@@ -972,7 +972,6 @@ header.gc-header h1 .icon { font-size: 22px; }
 /* ── Categories container ────────────────────────────── */
 #categoriesContainer {
   padding-bottom: 8px;
-  overflow: hidden;
   transition: height 0.2s ease;
 }
 
@@ -2011,6 +2010,7 @@ function collapseAll() {
     expandedPanel.innerHTML = "";
     expandedPanel = null;
   }
+  setTimeout(resizeContainerToActive, 50);
 }
 
 function isDangerCmd(cmd) {
@@ -2136,6 +2136,7 @@ function toggleCard(cardEl, cmd, panel) {
   } else {
     showServicePanel(panel, cmd);
   }
+  setTimeout(resizeContainerToActive, 50);
 }
 
 /* ── Build Categories ────────────────────────────────── */
