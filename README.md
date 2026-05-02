@@ -21,20 +21,10 @@ No laptop. No SSH. No terminal. Just your phone and the Gotify app you already u
 
 ## Demo
 
-<table>
-<tr>
-<td align="center"><strong>Commands & Service Management</strong></td>
-<td align="center"><strong>GPS Location</strong></td>
-</tr>
-<tr>
-<td align="center"><img src="assets/demo.gif" alt="Demo — sending commands, restarting services, checking system status" width="280"></td>
-<td align="center"><a href="assets/demo-location.gif"><img src="assets/demo-location-poster.jpg" alt="Click to play — GPS locate with reverse geocoding" width="280"></a></td>
-</tr>
-<tr>
-<td align="center"><em>Send commands, get results as notifications</em></td>
-<td align="center"><em>Click to play</em></td>
-</tr>
-</table>
+| Commands & Service Management | GPS Location |
+|:---:|:---:|
+| ![Demo — commands and service management](assets/demo.gif) | [![Click to play — GPS locate](assets/demo-location-poster.jpg)](assets/demo-location.gif) |
+| *Send commands, get results as notifications* | *Click to play* |
 
 ---
 
