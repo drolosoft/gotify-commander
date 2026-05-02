@@ -34,7 +34,11 @@ Restart services, check system status, tail logs -- all from the Gotify app on y
 Share your location from your phone and get a reverse-geocoded address with a map tile -- all without leaving the Gotify app.
 
 <p align="center">
-  <img src="assets/demo-location.gif" alt="Demo — GPS locate feature with reverse geocoding and map tile" width="280">
+  <a href="assets/demo-location.gif">
+    <img src="assets/demo-location-poster.jpg" alt="Click to play — GPS locate feature with reverse geocoding" width="280">
+  </a>
+  <br>
+  <em>Click to play</em>
 </p>
 
 ---
