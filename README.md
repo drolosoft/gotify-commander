@@ -21,20 +21,21 @@ No laptop. No SSH. No terminal. Just your phone and the Gotify app you already u
 
 ## Demo
 
-<table>
-<tr>
-<td align="center"><strong>Commands & Service Management</strong></td>
-<td align="center"><strong>GPS Location</strong></td>
-</tr>
-<tr>
-<td align="center"><img src="assets/demo.gif" alt="Demo — sending commands, restarting services, checking system status from the Gotify mobile app" width="280"></td>
-<td align="center"><img src="assets/demo-location.gif" alt="Demo — GPS locate feature with reverse geocoding and map tile" width="280"></td>
-</tr>
-<tr>
-<td align="center"><em>Send commands from Gotify, get results as notifications</em></td>
-<td align="center"><em>Locate any device with GPS reverse geocoding</em></td>
-</tr>
-</table>
+### Send commands, get results as notifications
+
+Restart services, check system status, tail logs -- all from the Gotify app on your phone. Type a command, get the result back as a notification in seconds.
+
+<p align="center">
+  <img src="assets/demo.gif" alt="Demo — sending commands, restarting services, checking system status from the Gotify mobile app" width="280">
+</p>
+
+### Locate any device with GPS
+
+Share your location from your phone and get a reverse-geocoded address with a map tile -- all without leaving the Gotify app.
+
+<p align="center">
+  <img src="assets/demo-location.gif" alt="Demo — GPS locate feature with reverse geocoding and map tile" width="280">
+</p>
 
 ---
 
