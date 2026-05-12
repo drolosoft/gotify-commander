@@ -19,7 +19,7 @@ No laptop. No SSH. No terminal. Just your phone and the Gotify app you already u
 
 ---
 
-## Demo
+## 🎬 Demo
 
 | Commands & Service Management | GPS Location |
 |:---:|:---:|
@@ -28,7 +28,7 @@ No laptop. No SSH. No terminal. Just your phone and the Gotify app you already u
 
 ---
 
-## How It Works
+## ⚡ How It Works
 
 ```
 Phone (Gotify app)
@@ -55,7 +55,7 @@ Commands and responses flow through a **single unified Gotify app** -- no separa
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 1. Download `gotify-commander-linux-amd64.so` from [Releases](../../releases)
 2. Drop it in Gotify's plugin directory (usually `/opt/gotify/data/plugins/`)
@@ -88,7 +88,7 @@ Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/dr
 
 ---
 
-## Command Reference
+## 📋 Command Reference
 
 <p align="center">
   <picture>
@@ -98,7 +98,7 @@ Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/dr
   </picture>
 </p>
 
-### Service Management (7)
+### 🔧 Service Management (7)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -110,7 +110,7 @@ Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/dr
 | `services` | -- | List all managed services |
 | `help` | -- | Show command reference + control panel link |
 
-### System Diagnostics (9)
+### 🖥️ System Diagnostics (9)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -124,7 +124,7 @@ Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/dr
 | `ports` | `[vps/mac]` | Listening ports |
 | `connections` | `[vps/mac]` | Socket statistics |
 
-### Monitoring & Analytics (4)
+### 📊 Monitoring & Analytics (4)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -133,13 +133,13 @@ Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/dr
 | `certs` | -- | SSL certificate expiry for all domains |
 | `updates` | -- | Pending system updates (apt) |
 
-### Location (1)
+### 📍 Location (1)
 
 | Command | Args | Description |
 |---------|------|-------------|
 | `locate` | `<lat> <lon>` | GPS reverse geocoding via OpenStreetMap |
 
-### Danger (2)
+### ⚠️ Danger (2)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -152,7 +152,7 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
 
 ---
 
-## Web UI Control Panel
+## 🖥️ Web UI Control Panel
 
 <p align="center">
   <picture>
@@ -164,18 +164,18 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
 
 A browser dashboard built with **Pico CSS** lives at `https://your-domain/plugin/gotify-commander/`.
 
-- Live service status grid -- all services, grouped by category, color-coded
-- One-click restart / start / stop for any service
-- Command history with timestamps and results
-- System metrics (memory, disk, uptime) at a glance
-- Dynamic favicons fetched from service domains
-- Dynamic categories from your YAML config -- no hardcoding
+- 🟢 Live service status grid — all services, grouped by category, color-coded
+- 🔄 One-click restart / start / stop for any service
+- 📜 Command history with timestamps and results
+- 📊 System metrics (memory, disk, uptime) at a glance
+- 🌐 Dynamic favicons fetched from service domains
+- 📂 Dynamic categories from your YAML config — no hardcoding
 
 Access is secured through your existing Gotify login. No extra credentials.
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 Configure via Gotify WebUI -- no config files to edit manually. See [`config.example.yaml`](config.example.yaml) for the full structure.
 
@@ -237,7 +237,7 @@ Required fields per machine type:
 
 ---
 
-## Multi-Machine
+## 🌐 Multi-Machine
 
 gotify-commander supports two machine types out of the box:
 
@@ -258,7 +258,7 @@ Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine:
 
 ---
 
-## Security
+## 🔒 Security
 
 **gotify-commander executes real system commands on your server.** Treat it with the same caution as SSH access.
 
@@ -282,41 +282,41 @@ Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine:
 4. **Use HTTPS** for all Gotify traffic.
 5. **Restrict Gotify app tokens.** Only create tokens for devices you control.
 
-### Defense Layers
+### 🛡️ Defense Layers
 
 | Layer | Status |
 |-------|--------|
-| Command whitelist (23 commands) | Enforced |
-| Input sanitization (regex) | Enforced |
-| Service name whitelist | Enforced |
-| Execution timeouts (30s default) | Enforced |
-| Gotify authentication | Enforced (Gotify's own auth) |
-| Web UI API authentication | Optional (`web_password`, off by default) |
-| Rate limiting | Not implemented |
-| Per-command authorization | Not implemented |
-| SSH host key verification | Disabled (`InsecureIgnoreHostKey`) |
+| Command whitelist (23 commands) | ✅ Enforced |
+| Input sanitization (regex) | ✅ Enforced |
+| Service name whitelist | ✅ Enforced |
+| Execution timeouts (30s default) | ✅ Enforced |
+| Gotify authentication | ✅ Enforced (Gotify's own auth) |
+| Web UI API authentication | ⚠️ Optional (`web_password`, off by default) |
+| Rate limiting | 🔲 Not implemented |
+| Per-command authorization | 🔲 Not implemented |
+| SSH host key verification | ⚠️ Disabled (`InsecureIgnoreHostKey`) |
 
 ---
 
-## Comparison
+## 🏆 Comparison
 
 | Feature | gotify-commander | Telegram Bots | Uptime Kuma |
 |---------|:---:|:---:|:---:|
-| Self-hosted | Yes | No | Yes |
-| Bidirectional | Yes | Yes | No |
-| Runs inside Gotify | Yes | No | No |
-| No third-party services | Yes | No | Yes |
-| Service management | Yes | varies | No |
-| Multi-machine (SSH) | Yes | varies | No |
-| Web control panel | Yes | No | Yes |
-| Traffic & analytics | Yes | No | No |
-| GPS locate | Yes | No | No |
-| Tailscale security | Yes | No | No |
-| Phone app already installed | Yes | Yes | No |
+| 🏠 Self-hosted | ✅ | ❌ | ✅ |
+| 🔄 Bidirectional | ✅ | ✅ | ❌ |
+| 🔌 Runs inside Gotify | ✅ | ❌ | ❌ |
+| 🚫 No third-party services | ✅ | ❌ | ✅ |
+| 🔧 Service management | ✅ | ⚠️ varies | ❌ |
+| 🌐 Multi-machine (SSH) | ✅ | ⚠️ varies | ❌ |
+| 🖥️ Web control panel | ✅ | ❌ | ✅ |
+| 📊 Traffic & analytics | ✅ | ❌ | ❌ |
+| 📍 GPS locate | ✅ | ❌ | ❌ |
+| 🔒 Tailscale security | ✅ | ❌ | ❌ |
+| 📱 Phone app already installed | ✅ | ✅ | ❌ |
 
 ---
 
-## External Dependencies
+## 📦 External Dependencies
 
 Some commands rely on utilities installed on the server. The plugin works without them, but those specific commands will fail.
 
@@ -333,7 +333,7 @@ Some commands rely on utilities installed on the server. The plugin works withou
 
 All other commands use standard Linux utilities (`systemctl`, `free`, `uptime`, `who`, `hostname`, `journalctl`).
 
-## Building from Source
+## 🔨 Building from Source
 
 The plugin must be built on Linux with `CGO_ENABLED=1` (Go plugins require cgo).
 
@@ -358,7 +358,7 @@ The `deploy` target connects to your VPS via Tailscale, pulls the latest commit,
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome -- bug fixes, new commands, feature ideas. Open an issue or submit a PR.
 
@@ -366,7 +366,7 @@ If gotify-commander made your server management easier, consider giving it a sta
 
 ---
 
-## Support
+## ☕ Support
 
 If gotify-commander gives you superpowers over your infrastructure, consider buying me a coffee -- it keeps the next one coming!
 
@@ -376,7 +376,7 @@ If gotify-commander gives you superpowers over your infrastructure, consider buy
 
 ---
 
-## License
+## 📄 License
 
 **MIT License** -- free to use, modify, and distribute.
 
