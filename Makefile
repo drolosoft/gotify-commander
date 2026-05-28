@@ -6,7 +6,7 @@ VPS_USER ?= your-user
 VPS_REPO ?= /path/to/gotify-commander
 VPS_PLUGIN_DIR ?= /path/to/gotify/data/plugins
 GOTIFY_SERVICE := gotify
-GOTIFY_BUILD_IMAGE := gotify/build:1.23.3-linux-amd64
+GOTIFY_BUILD_IMAGE := gotify/build:1.26.0-linux-amd64
 DOCKER_GO_BUILD := go build -mod=readonly -a -installsuffix cgo -buildmode=plugin
 
 .PHONY: test lint build deploy deploy-dev clean help
