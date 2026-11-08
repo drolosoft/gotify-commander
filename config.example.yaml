@@ -26,6 +26,9 @@ defaults:
   timeout: 30s
   # How many lines "logs <service>" shows.
   log_lines: 30
+  # Commands accepted per minute from Gotify messages; refused ones get a
+  # "too many commands" reply. The web panel has its own budget of 10. 0 = 10.
+  rate_limit_per_minute: 10
 
 # SSH targets for remote machines (optional). Only "mac" is used today: it
 # runs the commands of services with machine: mac and the "mac" target.
