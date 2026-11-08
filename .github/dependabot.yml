@@ -1,0 +1,11 @@
+version: 2
+
+# Only the GitHub Actions are kept up to date here. Go modules are left out on
+# purpose: a Gotify plugin must be built with the same module versions as the
+# Gotify server release it runs in, so they move with scripts/pin-gotify.sh
+# when Gotify releases, not on their own.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
