@@ -29,6 +29,10 @@ defaults:
   # Commands accepted per minute from Gotify messages; refused ones get a
   # "too many commands" reply. The web panel has its own budget of 10. 0 = 10.
   rate_limit_per_minute: 10
+  # Commands posted while the plugin was disconnected (a Gotify restart) run
+  # when it reconnects if they are younger than this. Needs a unit: 0s turns
+  # the replay off, 5m is the default.
+  replay_window: 5m
 
 # SSH targets for remote machines (optional). Only "mac" is used today: it
 # runs the commands of services with machine: mac and the "mac" target.
