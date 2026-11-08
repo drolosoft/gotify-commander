@@ -1,7 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -45,7 +49,22 @@ type Plugin struct {
 	mu             sync.Mutex
 	startTime      time.Time
 	webhookPath    string // full path to the control panel UI
+
+	// panelPassword is the generated control panel password, used only
+	// while web_password is empty. It is shown on the plugin page and kept
+	// in the plugin storage so it survives restarts.
+	panelPassword string
 }
+
+// pluginState is what the plugin keeps in its Gotify storage blob. It is JSON
+// so later fields can be added without breaking the stored password.
+type pluginState struct {
+	PanelPassword string `json:"panel_password"`
+}
+
+// panelPasswordBytes is the amount of randomness in a generated password:
+// 24 bytes are 192 bits, far beyond any online guessing.
+const panelPasswordBytes = 24
 
 // NewGotifyPluginInstance is the factory function called by Gotify when loading the plugin.
 func NewGotifyPluginInstance(ctx plugin.UserContext) plugin.Plugin {
@@ -118,9 +137,103 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 		return err
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.cfg = cfg
-	p.mu.Unlock()
+
+	// Gotify applies a new configuration without calling Enable again. If
+	// the user just emptied web_password on a running plugin, the panel
+	// needs the generated password now, not after the next restart.
+	if p.enabled && cfg.WebPassword == "" {
+		p.ensurePanelPassword()
+	}
 	return nil
+}
+
+// ─── Control panel password ──────────────────────────────────────────────────
+
+// ensurePanelPassword makes sure a generated control panel password exists:
+// the one already in memory, else the one in the plugin storage, else a new
+// one that is saved there. The caller must hold p.mu.
+func (p *Plugin) ensurePanelPassword() {
+	if p.panelPassword != "" {
+		return
+	}
+
+	state := p.loadState()
+	if state.PanelPassword != "" {
+		p.panelPassword = state.PanelPassword
+		return
+	}
+
+	state.PanelPassword = generatePanelPassword()
+	p.panelPassword = state.PanelPassword
+
+	// A failed save is not fatal: the panel keeps working with the password
+	// in memory and a new one is made on the next start. The error says
+	// nothing about the password itself, so it is safe to log.
+	if err := p.saveState(state); err != nil {
+		log.Printf("[plugin] could not store the control panel password: %v", err)
+	}
+}
+
+// loadState reads the plugin storage blob. Missing, empty or unreadable
+// storage gives an empty state, which makes the caller generate a password.
+func (p *Plugin) loadState() pluginState {
+	var state pluginState
+	if p.storageHandler == nil {
+		return state
+	}
+
+	blob, err := p.storageHandler.Load()
+	if err != nil {
+		log.Printf("[plugin] could not read the plugin storage: %v", err)
+		return state
+	}
+	if len(blob) == 0 {
+		return state
+	}
+
+	if err := json.Unmarshal(blob, &state); err != nil {
+		log.Printf("[plugin] plugin storage is not valid JSON, starting over: %v", err)
+		return pluginState{}
+	}
+	return state
+}
+
+// saveState writes the plugin storage blob.
+func (p *Plugin) saveState(state pluginState) error {
+	if p.storageHandler == nil {
+		return fmt.Errorf("no storage handler")
+	}
+
+	blob, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return p.storageHandler.Save(blob)
+}
+
+// generatePanelPassword returns panelPasswordBytes random bytes as base64url
+// without padding, so it can be copied from the plugin page as one word.
+// crypto/rand.Read never fails since Go 1.24; it aborts the process instead.
+func generatePanelPassword() string {
+	random := make([]byte, panelPasswordBytes)
+	rand.Read(random)
+	return base64.RawURLEncoding.EncodeToString(random)
+}
+
+// effectivePassword returns the password the panel API accepts: web_password
+// from the configuration when it is set, the generated one otherwise. An
+// empty result means no password exists yet and nothing is accepted.
+func (p *Plugin) effectivePassword() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.cfg != nil && p.cfg.WebPassword != "" {
+		return p.cfg.WebPassword
+	}
+	return p.panelPassword
 }
 
 // ─── Plugin lifecycle ─────────────────────────────────────────────────────────
@@ -143,13 +256,13 @@ func (p *Plugin) Enable() error {
 	// SSH wiring for Mac Mini is handled automatically inside commander.New.
 	cmdr := commander.New(cfg, localExec, p)
 
-	// Set the web UI URL so help can show it
-	if p.webhookPath != "" {
-		if cfg.Gotify.BaseURL != "" {
-			cfg.WebURL = strings.TrimRight(cfg.Gotify.BaseURL, "/") + p.webhookPath + "/"
-		} else {
-			cfg.WebURL = p.webhookPath + "/"
-		}
+	// cfg.WebURL is left empty on purpose. help prints it when it is set,
+	// and the panel URL carries the plugin token, which Gotify does not
+	// check: anyone who reads a help reply could open the panel. The link
+	// lives only on the plugin page in Gotify (GetDisplay).
+
+	if cfg.WebPassword == "" {
+		p.ensurePanelPassword()
 	}
 
 	p.cmdr = cmdr
@@ -171,10 +284,11 @@ func (p *Plugin) Enable() error {
 	p.enabled = true
 
 	// Announce online — done outside the lock via goroutine to avoid deadlock
-	// if Send tries to acquire the lock (it only reads msgHandler).
-	panelURL := p.webhookPath + "/"
+	// if Send tries to acquire the lock (it only reads msgHandler). Messages
+	// reach every client of the user, so neither the panel URL nor its
+	// password goes in them.
 	go p.Send("🤖 Commander Online",
-		fmt.Sprintf("gotify-commander is ready.\n\nSend `help` for commands.\n\n**Control Panel:** [Open](%s)", panelURL),
+		"gotify-commander is ready.\n\nSend `help` for commands.\n\nOpen the control panel from the plugin page in Gotify.",
 		3, true)
 
 	return nil
@@ -201,39 +315,56 @@ type executeRequest struct {
 	Command string `json:"command"`
 }
 
-// checkAuth validates the web_password from config. Returns true if auth passes.
-func (p *Plugin) checkAuth(c *gin.Context) bool {
-	p.mu.Lock()
-	pwd := ""
-	if p.cfg != nil {
-		pwd = p.cfg.WebPassword
-	}
-	p.mu.Unlock()
+// checkAuth reports whether the request carries "Authorization: Bearer
+// <password>" with the current panel password. The password is never read
+// from the query string: URLs end up in proxy logs and browser history.
+func (p *Plugin) checkAuth(r *http.Request) bool {
+	want := p.effectivePassword()
 
-	// No password configured = no auth required
-	if pwd == "" {
-		return true
+	// Fail closed: before Enable there is no password, and an empty Bearer
+	// must not match it.
+	if want == "" {
+		return false
 	}
 
-	// Check Authorization header: "Bearer <password>"
-	auth := c.GetHeader("Authorization")
-	if auth == "Bearer "+pwd {
-		return true
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return false
 	}
 
-	// Check query param: ?token=<password>
-	if c.Query("token") == pwd {
-		return true
-	}
+	// Comparing digests keeps the comparison constant-time and also hides
+	// the password length, which ConstantTimeCompare alone would leak.
+	gotDigest := sha256.Sum256([]byte(got))
+	wantDigest := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(gotDigest[:], wantDigest[:]) == 1
+}
 
-	c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-	return false
+// requireAuth is the gin middleware for every panel API route.
+func (p *Plugin) requireAuth(c *gin.Context) {
+	if !p.checkAuth(c.Request) {
+		c.Header("WWW-Authenticate", `Bearer realm="gotify-commander"`)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	c.Next()
 }
 
 // RegisterWebhook registers HTTP endpoints under the plugin's base path.
 func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
-	p.webhookPath = g.BasePath()
-	log.Printf("[plugin] RegisterWebhook called: basePath=%q path=%q", basePath, p.webhookPath)
+	// The trailing slash is trimmed so links built as webhookPath + "/" do
+	// not end in "//".
+	p.mu.Lock()
+	p.webhookPath = strings.TrimRight(g.BasePath(), "/")
+	p.mu.Unlock()
+
+	// The path is not logged: its last segment is the plugin token, and the
+	// Gotify log is read by more people than the panel should be.
+	log.Printf("[plugin] RegisterWebhook called")
+
+	// Every route below needs the panel password except the page itself and
+	// its icon, which hold no data. Grouping them makes a new route
+	// protected by default.
+	api := g.Group("", p.requireAuth)
 
 	// GET / — command UI (always served, auth happens on API calls)
 	g.GET("/", func(c *gin.Context) {
@@ -247,8 +378,7 @@ func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
 	})
 
 	// GET /health — liveness + stats
-	g.GET("/health", func(c *gin.Context) {
-		if !p.checkAuth(c) { return }
+	api.GET("/health", func(c *gin.Context) {
 		p.mu.Lock()
 		enabled := p.enabled
 		cmdr := p.cmdr
@@ -271,8 +401,7 @@ func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
 	})
 
 	// GET /config — returns plugin configuration for dynamic UI menus
-	g.GET("/config", func(c *gin.Context) {
-		if !p.checkAuth(c) { return }
+	api.GET("/config", func(c *gin.Context) {
 		p.mu.Lock()
 		enabled := p.enabled
 		cfg := p.cfg
@@ -358,8 +487,7 @@ func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
 	})
 
 	// POST /execute — run a command directly via the webhook
-	g.POST("/execute", func(c *gin.Context) {
-		if !p.checkAuth(c) { return }
+	api.POST("/execute", func(c *gin.Context) {
 		p.mu.Lock()
 		enabled := p.enabled
 		cmdr := p.cmdr
@@ -398,7 +526,10 @@ func (p *Plugin) GetDisplay(location *url.URL) string {
 	enabled := p.enabled
 	cmdr := p.cmdr
 	startTime := p.startTime
+	webhookPath := p.webhookPath
 	p.mu.Unlock()
+
+	passwordSection := p.passwordSection()
 
 	statusIcon := "❌"
 	if enabled {
@@ -406,7 +537,7 @@ func (p *Plugin) GetDisplay(location *url.URL) string {
 	}
 
 	if cmdr == nil {
-		return fmt.Sprintf("## gotify-commander\n\n**Status:** %s Disabled\n", statusIcon)
+		return fmt.Sprintf("## gotify-commander\n\n**Status:** %s Disabled\n%s", statusIcon, passwordSection)
 	}
 
 	count, last, _, uptime := cmdr.Stats()
@@ -419,8 +550,8 @@ func (p *Plugin) GetDisplay(location *url.URL) string {
 	_ = startTime // startTime tracked but uptime comes from commander
 
 	panelLink := ""
-	if p.webhookPath != "" {
-		panelLink = fmt.Sprintf("\n**Control Panel:** [Open](%s/)  \n", p.webhookPath)
+	if webhookPath != "" {
+		panelLink = fmt.Sprintf("\n**Control Panel:** [Open](%s/)  \n", webhookPath)
 	}
 
 	return fmt.Sprintf(
@@ -430,14 +561,41 @@ func (p *Plugin) GetDisplay(location *url.URL) string {
 			"**Commands executed:** %d  \n"+
 			"**Last command:** `%s`  \n"+
 			"%s\n"+
-			"Send `help` to the command app to see available commands.",
+			"Send `help` to the command app to see available commands.\n"+
+			"%s",
 		statusIcon,
 		map[bool]string{true: "Online", false: "Offline"}[enabled],
 		uptime.Round(time.Second).String(),
 		count,
 		lastCmd,
 		panelLink,
+		passwordSection,
 	)
+}
+
+// passwordSection returns the Markdown that tells the user which password the
+// control panel asks for. This screen is the only place the generated
+// password is shown: it is never logged and never sent as a message.
+func (p *Plugin) passwordSection() string {
+	p.mu.Lock()
+	configured := p.cfg != nil && p.cfg.WebPassword != ""
+	generated := p.panelPassword
+	p.mu.Unlock()
+
+	section := "\n### 🔑 Control panel password\n\n"
+
+	// The user typed a configured password themselves, so it is not echoed.
+	if configured {
+		return section + "Set by `web_password` in the plugin configuration.\n"
+	}
+	if generated == "" {
+		return section + "Enable the plugin to generate it.\n"
+	}
+	return section +
+		"`" + generated + "`\n\n" +
+		"Enter it when the control panel asks for it. It was generated for this plugin " +
+		"and is kept in the plugin storage. To use your own, set `web_password` in the " +
+		"plugin configuration; empty it to go back to this one.\n"
 }
 
 func main() {

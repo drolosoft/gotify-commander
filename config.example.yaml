@@ -3,10 +3,16 @@
 
 gotify:
   server_url: "http://localhost:2006"
-  base_url: "https://gotify.example.com"     # public URL — shown in help and control panel links
+  base_url: "https://gotify.example.com"     # public URL of your Gotify server
   client_token: "your-gotify-client-token"    # Clients → Create → copy token
   command_app_id: 1                           # plugin's own app ID (shown in Plugins page)
   response_app_token: "your-response-token"
+
+# Password for the web control panel (sent as "Authorization: Bearer ...").
+# Empty = a random password is generated, stored by the plugin and shown on
+# the plugin page in Gotify (Plugins → gotify-commander). Set your own here
+# to replace it; empty it again to go back to the generated one.
+web_password: ""
 
 defaults:
   timeout: 30s
