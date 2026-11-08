@@ -23,7 +23,7 @@ No laptop. No SSH. No terminal. Just your phone and the Gotify app you already u
 
 | Commands & Service Management | GPS Location |
 |:---:|:---:|
-| ![Demo — commands and service management](assets/demo.gif) | [![Click to play — GPS locate](assets/demo-location-poster.jpg)](assets/demo-location.gif) |
+| ![Demo -- commands and service management](assets/demo.gif) | [![Click to play -- GPS locate](assets/demo-location-poster.jpg)](assets/demo-location.gif) |
 | *Send commands, get results as notifications* | *Click to play* |
 
 ---
@@ -164,12 +164,12 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
 
 A browser dashboard built with **Pico CSS**. The link is on the plugin page in Gotify (**Plugins** -> **gotify-commander**).
 
-- 🟢 Live service status grid — all services, grouped by category, color-coded
+- 🟢 Live service status grid: all services, grouped by category, color-coded
 - 🔄 One-click restart / start / stop for any service
 - 📜 Command history with timestamps and results
 - 📊 System metrics (memory, disk, uptime) at a glance
 - 🌐 Dynamic favicons fetched from service domains
-- 📂 Dynamic categories from your YAML config — no hardcoding
+- 📂 Dynamic categories from your YAML config: no hardcoding
 
 The panel asks for a password the first time you open it in a tab. If `web_password` is empty, the plugin generates one when it is enabled, keeps it in its storage and shows it only on the plugin page in Gotify, under **Control panel password**. Set `web_password` to use your own; empty it to go back to the generated one. The browser keeps the password until the tab is closed.
 
@@ -256,9 +256,18 @@ ssh_targets:
     port: 22
     user: "admin"
     key_file: "/home/admin/.ssh/id_rsa"
+    known_hosts_file: "/home/admin/.ssh/known_hosts"   # optional, see below
 ```
 
 Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine: mac` all route through SSH automatically.
+
+The plugin verifies the remote host key against `known_hosts`. By default it reads `~/.ssh/known_hosts` of the user that runs Gotify; when Gotify runs as a service or in Docker that file often does not exist, so set `known_hosts_file` or add the key first:
+
+```bash
+ssh-keyscan -p 22 100.x.x.x >> /home/admin/.ssh/known_hosts
+```
+
+Without a matching entry, commands to that machine fail with a host key error. There is no fallback to an unverified connection.
 
 ---
 
@@ -276,8 +285,12 @@ Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine:
 
 - Only the **23 registered commands** can run. No arbitrary command execution.
 - Service names are validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` and must match your configured whitelist.
-- Most commands use `exec.Command` (no shell). However, **four commands use `bash -c`**: `certs`, `traffic`, `analytics`, and `locate`. User input reaching these shells is validated (alphanumeric for service names, numeric-only for GPS coordinates), but a shell is invoked.
-- The plugin runs with the same permissions as the Gotify process.
+- Commands run through `exec.Command` without a shell. The one exception is a fixed script in `traffic` that filters the nginx logs; the domain and the temp file path reach it as positional arguments, never as part of the script text.
+- Every command runs in its own process group with a timeout that kills the whole group, and its output is capped at 64 KiB.
+- SSH targets are verified against `known_hosts`. Remote commands are quoted word by word.
+- The plugin runs with the same permissions as the Gotify process plus the `sudo` rules you grant it. `config.example.yaml` ends with a minimal `sudoers` block listing the binaries the commands call.
+- Only Gotify administrators get a working plugin instance. For other users the plugin page shows a notice and nothing is started.
+- `locate` sends the coordinates you type to the OpenStreetMap Nominatim service to get an address. The coordinates are not written to the plugin log, but they do leave your server.
 
 ### Hardening Recommendations
 
@@ -299,8 +312,10 @@ Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine:
 | Web UI API authentication | ✅ Enforced (Bearer password, generated if `web_password` is empty) |
 | Web UI security headers (CSP with nonce, no framing, no-store) | ✅ Enforced |
 | Rate limiting | ✅ Web UI `/execute`: 2 at a time, 10 per minute |
+| Admin-only plugin instances | ✅ Enforced |
+| Process group timeouts and 64 KiB output cap | ✅ Enforced |
+| SSH host key verification | ✅ Enforced (`known_hosts`) |
 | Per-command authorization | 🔲 Not implemented |
-| SSH host key verification | ⚠️ Disabled (`InsecureIgnoreHostKey`) |
 
 ---
 
@@ -331,13 +346,12 @@ Some commands rely on utilities installed on the server. The plugin works withou
 | `df` | [duf](https://github.com/mdu-perrone/duf) | `apt install duf` | Required -- command fails if not installed |
 | `traffic` | [rhit](https://github.com/Canop/rhit) | Download from [releases](https://github.com/Canop/rhit/releases) | Nginx log analyzer |
 | `analytics` | [goaccess](https://goaccess.io/) | `apt install goaccess` | Web analytics from nginx logs |
-| `analytics` | `python3` | Pre-installed on most distros | Parses goaccess CSV output |
-| `locate` | `python3` + `curl` | Pre-installed on most distros | Reverse geocoding via Nominatim |
+| `locate` | outbound HTTPS to `nominatim.openstreetmap.org` | -- | Reverse geocoding, done in Go |
 | `certs` | `openssl` | Pre-installed on most distros | Reads Let's Encrypt certificates |
 | `ports` | `ss` | Part of `iproute2` | Socket statistics |
 | `top` | `ps` | Part of `procps` | Process listing |
 
-All other commands use standard Linux utilities (`systemctl`, `free`, `uptime`, `who`, `hostname`, `journalctl`).
+All other commands use standard Linux utilities (`systemctl`, `free`, `uptime`, `who`, `hostname`, `journalctl`, `zcat`, `grep`). `python3` is no longer needed.
 
 ## 🔨 Building from Source
 
