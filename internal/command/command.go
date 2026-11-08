@@ -27,6 +27,12 @@ const (
 	ActionTraffic     Action = "traffic"
 	ActionAnalytics   Action = "analytics"
 	ActionLocate      Action = "locate"
+
+	// ActionConfirm answers a confirmation request: "confirm 4821" runs
+	// the dangerous command that is waiting for that code. The code
+	// travels in Command.Target. It has no handler in the registry; the
+	// commander takes it before the lookup.
+	ActionConfirm Action = "confirm"
 )
 
 // Command holds a parsed user command.

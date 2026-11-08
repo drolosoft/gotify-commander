@@ -47,6 +47,10 @@ func TestParse(t *testing.T) {
 		{"nginx", ActionStatus, "nginx", false},
 		{"porra", ActionStatus, "laporra", false},
 		{"RESTART Nginx", ActionRestart, "nginx", false},
+		{"confirm 4821", ActionConfirm, "4821", false},
+		{"Confirm 4821 please", ActionConfirm, "4821", false},
+		{"confirm", ActionConfirm, "", false},
+		{"confirm ng", ActionConfirm, "ng", false},
 		{"unknowncmd", "", "", true},
 		{"", "", "", true},
 	}
