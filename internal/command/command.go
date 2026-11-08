@@ -29,6 +29,19 @@ const (
 	ActionLocate      Action = "locate"
 )
 
+// Operations actions, registered by RegisterExtras. docker gets one action
+// per subcommand, so that only docker-restart is dangerous; ActionDocker
+// itself only answers the usage.
+const (
+	ActionFailed        Action = "failed"
+	ActionHealth        Action = "health"
+	ActionDigest        Action = "digest"
+	ActionDocker        Action = "docker"
+	ActionDockerPs      Action = "docker-ps"
+	ActionDockerRestart Action = "docker-restart"
+	ActionDockerLogs    Action = "docker-logs"
+)
+
 // Command holds a parsed user command.
 type Command struct {
 	Action Action

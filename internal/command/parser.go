@@ -111,6 +111,11 @@ func Parse(input string, aliases map[string]string, services map[string]bool) (C
 		args[i] = strings.ToLower(a)
 	}
 
+	// The operations verbs (failed, health, digest, docker) parse in extra.go.
+	if cmd, ok := parseExtra(verb, args, raw); ok {
+		return cmd, nil
+	}
+
 	// Check if verb is a known command action
 	if action, ok := commandAliases[verb]; ok {
 		target := resolveTarget(action, args, aliases)

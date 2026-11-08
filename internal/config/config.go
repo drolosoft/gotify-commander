@@ -24,6 +24,8 @@ type Config struct {
 	Services    map[string]Service   `yaml:"services"`
 	Categories  []Category           `yaml:"categories"`
 	WebPassword string               `yaml:"web_password"`
+	Docker      DockerConfig         `yaml:"docker"`
+	Digest      DigestConfig         `yaml:"digest"`
 	WebURL      string               `yaml:"-"` // full control panel URL, set at runtime
 }
 
@@ -220,4 +222,33 @@ func BuildAliasMap(cfg *Config) map[string]string {
 		}
 	}
 	return m
+}
+
+// ─── Operations: docker and digest ──────────────────────────────────────────
+
+// DockerConfig limits the docker command to the containers named here.
+type DockerConfig struct {
+	// AllowedContainers are the only container names that docker ps shows
+	// and docker restart and docker logs accept. Empty means none: a stolen
+	// client token must not be able to restart every container on the host.
+	AllowedContainers []string `yaml:"allowed_containers"`
+}
+
+// DefaultDigestAt is the local time the daily digest goes out when digest.at
+// is not set: early enough to read before the working day.
+const DefaultDigestAt = "07:30"
+
+// DigestConfig schedules the daily health digest.
+type DigestConfig struct {
+	// Enabled turns the daily message on. The digest command works either
+	// way.
+	Enabled bool `yaml:"enabled"`
+
+	// At is the time of day, "15:04" in 24-hour form. Empty means
+	// DefaultDigestAt.
+	At string `yaml:"at"`
+
+	// Timezone is an IANA name such as "Europe/Madrid". Empty means the
+	// timezone of the host that runs Gotify.
+	Timezone string `yaml:"timezone"`
 }
