@@ -57,7 +57,6 @@ var commandAliases = map[string]Action{
 	"locate":       ActionLocate,
 	"where":        ActionLocate,
 	"location":     ActionLocate,
-	"confirm":      ActionConfirm,
 }
 
 // systemCommands are actions that default their target to "vps" when no target is given.
@@ -96,7 +95,9 @@ var noTargetCommands = map[Action]bool{
 //
 // aliases maps short names / nicknames to canonical service names.
 // services is the set of known service names for smart fallback (bare name → status).
-func Parse(input string, aliases map[string]string, services map[string]bool) (Command, error) {
+// keyword is the reply word of the confirmation by message; empty when
+// confirmation is off, so no word is taken from the commands.
+func Parse(input string, aliases map[string]string, services map[string]bool, keyword string) (Command, error) {
 	raw := input
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -110,6 +111,12 @@ func Parse(input string, aliases map[string]string, services map[string]bool) (C
 	// Lower-case all args for consistency
 	for i, a := range args {
 		args[i] = strings.ToLower(a)
+	}
+
+	// The keyword is read before every command word, so a reply to a
+	// confirmation request is never taken for a command.
+	if cmd, ok := parseConfirm(verb, args, raw, keyword); ok {
+		return cmd, nil
 	}
 
 	// The operations verbs (failed, health, digest, docker) parse in extra.go.
@@ -136,18 +143,24 @@ func Parse(input string, aliases map[string]string, services map[string]bool) (C
 	return Command{}, errors.New("unknown command: " + verb)
 }
 
-// resolveTarget determines the target for an action given its args and alias map.
-func resolveTarget(action Action, args []string, aliases map[string]string) string {
-	// The argument of confirm is a code, not a name, so it is kept as
-	// typed: a code that happens to be a service alias must not turn
-	// into the service.
-	if action == ActionConfirm {
-		if len(args) == 0 {
-			return ""
-		}
-		return args[0]
+// parseConfirm returns the confirmation reply "<keyword> <code>" when verb
+// is the keyword. The code is kept as typed, without alias resolution: a
+// code that happens to be a service alias must not turn into the service.
+func parseConfirm(verb string, args []string, raw string, keyword string) (Command, bool) {
+	if keyword == "" || verb != keyword {
+		return Command{}, false
 	}
 
+	code := ""
+	if len(args) > 0 {
+		code = args[0]
+	}
+
+	return Command{Action: ActionConfirm, Target: code, Raw: raw}, true
+}
+
+// resolveTarget determines the target for an action given its args and alias map.
+func resolveTarget(action Action, args []string, aliases map[string]string) string {
 	// Actions with no meaningful target
 	if noTargetCommands[action] {
 		if len(args) > 0 {

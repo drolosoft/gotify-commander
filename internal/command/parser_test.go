@@ -57,7 +57,7 @@ func TestParse(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
-			cmd, err := Parse(tc.input, testAliases, testServices)
+			cmd, err := Parse(tc.input, testAliases, testServices, "confirm")
 			if tc.expectError {
 				if err == nil {
 					t.Errorf("input %q: expected error, got none (action=%s, target=%s)", tc.input, cmd.Action, cmd.Target)
@@ -75,5 +75,43 @@ func TestParse(t *testing.T) {
 				t.Errorf("input %q: target = %q, want %q", tc.input, cmd.Target, tc.expectedTarget)
 			}
 		})
+	}
+}
+
+// TestParseConfirmationKeyword: the reply word comes from the configuration,
+// an empty keyword means confirmation is off, and the keyword is read before
+// the command aliases.
+func TestParseConfirmationKeyword(t *testing.T) {
+	cases := []struct {
+		input       string
+		keyword     string
+		action      Action
+		target      string
+		expectError bool
+	}{
+		{input: "ok 1234", keyword: "ok", action: ActionConfirm, target: "1234"},
+		{input: "OK 1234", keyword: "ok", action: ActionConfirm, target: "1234"},
+		{input: "confirm 1234", keyword: "ok", expectError: true},
+		{input: "confirm 1234", keyword: "", expectError: true},
+		{input: "up 1234", keyword: "up", action: ActionConfirm, target: "1234"},
+		{input: "up", keyword: "", action: ActionUptime, target: "vps"},
+	}
+
+	for _, tc := range cases {
+		cmd, err := Parse(tc.input, testAliases, testServices, tc.keyword)
+		if tc.expectError {
+			if err == nil {
+				t.Errorf("Parse(%q, keyword %q) = %+v, want an error", tc.input, tc.keyword, cmd)
+			}
+			continue
+		}
+
+		if err != nil {
+			t.Errorf("Parse(%q, keyword %q): %v", tc.input, tc.keyword, err)
+			continue
+		}
+		if cmd.Action != tc.action || cmd.Target != tc.target {
+			t.Errorf("Parse(%q, keyword %q) = %q %q, want %q %q", tc.input, tc.keyword, cmd.Action, cmd.Target, tc.action, tc.target)
+		}
 	}
 }

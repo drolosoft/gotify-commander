@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,13 +36,14 @@ type Config struct {
 	// panel or a message; left out or empty, every command runs. One
 	// outside the list is answered as disabled and not counted.
 	//
-	// RequireConfirm lists the commands that a Gotify message does not run
-	// at once: the reply carries a code, and "confirm <code>" within 60 s
-	// runs it. Left out (or null), it is DefaultRequireConfirm; an explicit
-	// empty list, require_confirm: [], turns the confirmation off. Read it
-	// through ConfirmCommands. The panel asks in the browser instead.
-	EnabledCommands []string `yaml:"enabled_commands"`
-	RequireConfirm  []string `yaml:"require_confirm"`
+	// RequireConfirm turns on the confirmation by message for the commands
+	// it lists: a Gotify message with one of them is not run at once, the
+	// reply carries a code, and "<keyword> <code>" within the window runs
+	// it. Left out, null or empty, no command asks. Confirmation words and
+	// timing come from Confirmation. The panel asks in the browser instead.
+	EnabledCommands []string           `yaml:"enabled_commands"`
+	RequireConfirm  []string           `yaml:"require_confirm"`
+	Confirmation    ConfirmationConfig `yaml:"confirmation"`
 }
 
 // GotifyConfig holds Gotify server connection settings.
@@ -132,10 +135,14 @@ func DefaultConfig() *Config {
 		SSHTargets: make(map[string]SSHTarget),
 		Services:   make(map[string]Service),
 
-		// Gotify stores the configuration by marshalling what it parsed,
-		// and a nil list marshals as [], which reads back as "confirmation
-		// off". Filling the default here keeps it through a save.
-		RequireConfirm: DefaultRequireConfirm(),
+		// Written out so the configuration Gotify shows on a new plugin
+		// names the three settings; they only matter once require_confirm
+		// lists a command.
+		Confirmation: ConfirmationConfig{
+			Keyword: DefaultConfirmationKeyword,
+			Prompt:  DefaultConfirmationPrompt,
+			Window:  DefaultConfirmationWindow,
+		},
 	}
 }
 
@@ -175,6 +182,10 @@ func Validate(cfg *Config) error {
 	// a typo.
 	if cfg.Defaults.ReplayWindow < 0 {
 		return fmt.Errorf("defaults.replay_window must be 0 (no replay) or a positive duration, got %s", cfg.Defaults.ReplayWindow)
+	}
+
+	if err := validateConfirmation(cfg); err != nil {
+		return err
 	}
 
 	// Service validation.
@@ -231,21 +242,112 @@ func ValidateCategoryCommands(cfg *Config, known []string) error {
 
 // ─── enabled_commands and require_confirm ────────────────────────────────────
 
-// DefaultRequireConfirm returns the commands a message must confirm when
-// require_confirm is left out: the ones that take a machine or a service
-// down. It is a new slice each time, so a caller cannot change the default.
-func DefaultRequireConfirm() []string {
-	return []string{"reboot", "shutdown", "stop"}
+// ConfirmationConfig is the wording and timing of the confirmation by
+// message. Every field may be left empty for its default.
+type ConfirmationConfig struct {
+	// Keyword is the word the user replies with, before the code. It is
+	// read before any command name, so it must not be one.
+	Keyword string `yaml:"keyword"`
+
+	// Prompt is the reply that asks for the code. {command}, {keyword},
+	// {code} and {seconds} are replaced; {code} is required.
+	Prompt string `yaml:"prompt"`
+
+	// Window is how long a code works. Like timeout, it needs a unit in
+	// YAML; 0 means DefaultConfirmationWindow.
+	Window time.Duration `yaml:"window"`
 }
 
-// ConfirmCommands returns the commands a message must confirm. A nil
-// RequireConfirm, a configuration that never set it, means the default; an
-// empty one that was set on purpose means none.
-func (cfg *Config) ConfirmCommands() []string {
-	if cfg.RequireConfirm == nil {
-		return DefaultRequireConfirm()
+// DefaultConfirmationKeyword is the reply word when confirmation.keyword is
+// empty.
+const DefaultConfirmationKeyword = "confirm"
+
+// DefaultConfirmationPrompt is the request message when confirmation.prompt
+// is empty.
+const DefaultConfirmationPrompt = "⚠️ Confirm `{command}`: reply `{keyword} {code}` within {seconds} s"
+
+// DefaultConfirmationWindow is the life of a code when confirmation.window
+// is 0. A minute is enough to read the reply on a phone and type four
+// digits; a code found later in the message history no longer runs anything.
+const DefaultConfirmationWindow = 60 * time.Second
+
+// KeywordOrDefault returns the keyword, or DefaultConfirmationKeyword when
+// it is empty.
+func (c ConfirmationConfig) KeywordOrDefault() string {
+	if c.Keyword == "" {
+		return DefaultConfirmationKeyword
 	}
-	return cfg.RequireConfirm
+	return c.Keyword
+}
+
+// PromptOrDefault returns the prompt, or DefaultConfirmationPrompt when it
+// is empty.
+func (c ConfirmationConfig) PromptOrDefault() string {
+	if c.Prompt == "" {
+		return DefaultConfirmationPrompt
+	}
+	return c.Prompt
+}
+
+// WindowOrDefault returns the window, or DefaultConfirmationWindow when it
+// is 0.
+func (c ConfirmationConfig) WindowOrDefault() time.Duration {
+	if c.Window == 0 {
+		return DefaultConfirmationWindow
+	}
+	return c.Window
+}
+
+// validateConfirmation checks the confirmation block against what this
+// package knows: the shape of the keyword, the services it could shadow,
+// the prompt and the window. ValidateCommandLists checks the keyword
+// against the command names, which live in the registry.
+func validateConfirmation(cfg *Config) error {
+	confirmation := cfg.Confirmation
+	keyword := confirmation.KeywordOrDefault()
+
+	if !isKeyword(keyword) {
+		return fmt.Errorf("confirmation.keyword must be one lowercase word starting with a letter, got %q", keyword)
+	}
+
+	// A bare service name runs "status <service>", and the keyword is read
+	// first, so the two cannot share a word. It only matters while some
+	// command asks for confirmation.
+	if len(cfg.RequireConfirm) > 0 {
+		if _, ok := BuildAliasMap(cfg)[keyword]; ok {
+			return fmt.Errorf("confirmation.keyword %q is also a service name or alias", keyword)
+		}
+	}
+
+	// Without the code in the reply nobody could confirm anything.
+	if !strings.Contains(confirmation.PromptOrDefault(), "{code}") {
+		return fmt.Errorf("confirmation.prompt must contain {code}, got %q", confirmation.Prompt)
+	}
+
+	// 0 asks for the default; the reply counts whole seconds, so anything
+	// shorter than one would read "within 0 s".
+	if confirmation.Window < 0 || confirmation.Window > 0 && confirmation.Window < time.Second {
+		return fmt.Errorf("confirmation.window must be 0 (the default, %s) or at least 1s, got %s", DefaultConfirmationWindow, confirmation.Window)
+	}
+
+	return nil
+}
+
+// isKeyword reports whether word is one lowercase word: a lowercase letter
+// first, then lowercase letters or digits. The parser lowercases the first
+// word of a message, so an upper-case keyword could never match.
+func isKeyword(word string) bool {
+	for index, character := range word {
+		if unicode.IsLower(character) {
+			continue
+		}
+		if index > 0 && unicode.IsDigit(character) {
+			continue
+		}
+		return false
+	}
+
+	return word != ""
 }
 
 // ValidateCommandLists checks that every name in enabled_commands and
@@ -268,6 +370,12 @@ func ValidateCommandLists(cfg *Config, known []string) error {
 		if !knownSet[name] {
 			return fmt.Errorf("require_confirm: unknown command %q", name)
 		}
+	}
+
+	// The keyword is read before the command names, so one named like a
+	// command would take that command's place.
+	if keyword := cfg.Confirmation.KeywordOrDefault(); len(cfg.RequireConfirm) > 0 && knownSet[keyword] {
+		return fmt.Errorf("confirmation.keyword %q is also a command name", keyword)
 	}
 
 	return nil

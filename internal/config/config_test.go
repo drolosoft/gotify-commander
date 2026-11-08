@@ -317,9 +317,7 @@ func TestReplayWindow(t *testing.T) {
 }
 
 func TestValidateCategoryCommands(t *testing.T) {
-	// The default require_confirm lists reboot, shutdown and stop, and it is
-	// checked here too, so they are known.
-	known := []string{"free", "df", "help", "locate", "reboot", "shutdown", "stop"}
+	known := []string{"free", "df", "help", "locate"}
 
 	cfg := DefaultConfig()
 	cfg.Categories = []Category{
@@ -409,19 +407,18 @@ func TestBuildAliasMap(t *testing.T) {
 	}
 }
 
-// TestRequireConfirm checks the three ways to write require_confirm: left
-// out, the default applies; an explicit empty list turns the confirmation
-// off; a list replaces the default.
+// TestRequireConfirm: confirmation is opt-in. Left out, null or empty, no
+// command asks for a code; a list turns it on for those commands.
 func TestRequireConfirm(t *testing.T) {
 	tests := []struct {
 		name string
 		yaml string
 		want []string
 	}{
-		{name: "missing means the default", yaml: "defaults:\n  timeout: 10s\n", want: []string{"reboot", "shutdown", "stop"}},
-		{name: "null means the default", yaml: "require_confirm:\n", want: []string{"reboot", "shutdown", "stop"}},
-		{name: "an empty list turns it off", yaml: "require_confirm: []\n", want: []string{}},
-		{name: "a list replaces the default", yaml: "require_confirm: [reboot, logs]\n", want: []string{"reboot", "logs"}},
+		{name: "missing means off", yaml: "defaults:\n  timeout: 10s\n", want: nil},
+		{name: "null means off", yaml: "require_confirm:\n", want: nil},
+		{name: "an empty list means off", yaml: "require_confirm: []\n", want: nil},
+		{name: "a list turns it on", yaml: "require_confirm: [reboot, logs]\n", want: []string{"reboot", "logs"}},
 	}
 
 	for _, tt := range tests {
@@ -431,24 +428,24 @@ func TestRequireConfirm(t *testing.T) {
 				t.Fatalf("ParseYAML: %v", err)
 			}
 
-			if got := cfg.ConfirmCommands(); !slices.Equal(got, tt.want) {
-				t.Errorf("ConfirmCommands() = %q, want %q", got, tt.want)
+			if !sameNames(cfg.RequireConfirm, tt.want) {
+				t.Errorf("RequireConfirm = %q, want %q", cfg.RequireConfirm, tt.want)
 			}
 		})
-	}
-
-	// A configuration built in code without DefaultConfig still confirms.
-	bare := &Config{}
-	if got := bare.ConfirmCommands(); !slices.Equal(got, DefaultRequireConfirm()) {
-		t.Errorf("ConfirmCommands() of a bare Config = %q, want the default", got)
 	}
 }
 
 // TestRequireConfirmSurvivesARoundTrip: Gotify stores the configuration by
-// marshalling what it parsed, so the default and an explicit empty list
-// must both read back the same after a save.
+// marshalling what it parsed, so "off" must stay off and a list must stay
+// the same list after a save.
 func TestRequireConfirmSurvivesARoundTrip(t *testing.T) {
-	for _, document := range []string{"defaults:\n  timeout: 10s\n", "require_confirm: []\n"} {
+	documents := []string{
+		"defaults:\n  timeout: 10s\n",
+		"require_confirm: []\n",
+		"require_confirm: [reboot, shutdown, stop]\nconfirmation:\n  keyword: ok\n  window: 10s\n",
+	}
+
+	for _, document := range documents {
 		first, err := ParseYAML([]byte(document))
 		if err != nil {
 			t.Fatalf("ParseYAML(%q): %v", document, err)
@@ -464,9 +461,115 @@ func TestRequireConfirmSurvivesARoundTrip(t *testing.T) {
 			t.Fatalf("ParseYAML(saved): %v", err)
 		}
 
-		if !slices.Equal(first.ConfirmCommands(), second.ConfirmCommands()) {
-			t.Errorf("%q: require_confirm %q became %q after a save", document, first.ConfirmCommands(), second.ConfirmCommands())
+		if !sameNames(first.RequireConfirm, second.RequireConfirm) {
+			t.Errorf("%q: require_confirm %q became %q after a save", document, first.RequireConfirm, second.RequireConfirm)
 		}
+		if first.Confirmation != second.Confirmation {
+			t.Errorf("%q: confirmation %+v became %+v after a save", document, first.Confirmation, second.Confirmation)
+		}
+	}
+}
+
+// sameNames reports whether two lists of command names are equal, with nil
+// and empty taken as the same: both mean "none" in the configuration.
+func sameNames(left, right []string) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	return slices.Equal(left, right)
+}
+
+func TestConfirmationDefaults(t *testing.T) {
+	cfg, err := ParseYAML([]byte("defaults:\n  timeout: 10s\n"))
+	if err != nil {
+		t.Fatalf("ParseYAML: %v", err)
+	}
+
+	confirmation := cfg.Confirmation
+	if confirmation.KeywordOrDefault() != "confirm" {
+		t.Errorf("keyword = %q, want confirm", confirmation.KeywordOrDefault())
+	}
+	if confirmation.PromptOrDefault() != "⚠️ Confirm `{command}`: reply `{keyword} {code}` within {seconds} s" {
+		t.Errorf("prompt = %q, want the default", confirmation.PromptOrDefault())
+	}
+	if confirmation.WindowOrDefault() != 60*time.Second {
+		t.Errorf("window = %s, want 60s", confirmation.WindowOrDefault())
+	}
+
+	// A block written with empty values, or a Config built in code, falls
+	// back to the same defaults.
+	var empty ConfirmationConfig
+	if empty.KeywordOrDefault() != "confirm" || empty.PromptOrDefault() != DefaultConfirmationPrompt || empty.WindowOrDefault() != DefaultConfirmationWindow {
+		t.Errorf("zero ConfirmationConfig = %q, %q, %s; want the defaults", empty.KeywordOrDefault(), empty.PromptOrDefault(), empty.WindowOrDefault())
+	}
+
+	custom, err := ParseYAML([]byte("confirmation:\n  keyword: ok\n  prompt: \"Send {keyword} {code}\"\n  window: 10s\n"))
+	if err != nil {
+		t.Fatalf("ParseYAML: %v", err)
+	}
+	if custom.Confirmation.KeywordOrDefault() != "ok" || custom.Confirmation.PromptOrDefault() != "Send {keyword} {code}" || custom.Confirmation.WindowOrDefault() != 10*time.Second {
+		t.Errorf("custom confirmation = %+v", custom.Confirmation)
+	}
+}
+
+func TestValidateConfirmation(t *testing.T) {
+	validBase := func() *Config {
+		cfg := DefaultConfig()
+		cfg.Gotify = GotifyConfig{ServerURL: "https://gotify.example.com", ClientToken: "token123", CommandAppID: 1}
+		cfg.Services = map[string]Service{
+			"nginx": {Machine: "vps", Systemd: "nginx", Aliases: []string{"web"}},
+		}
+		cfg.RequireConfirm = []string{"reboot"}
+		return cfg
+	}
+
+	if err := Validate(validBase()); err != nil {
+		t.Fatalf("valid base: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{name: "upper case keyword", mutate: func(c *Config) { c.Confirmation.Keyword = "Confirm" }, wantErr: "confirmation.keyword"},
+		{name: "two words", mutate: func(c *Config) { c.Confirmation.Keyword = "do it" }, wantErr: "confirmation.keyword"},
+		{name: "punctuation", mutate: func(c *Config) { c.Confirmation.Keyword = "ok!" }, wantErr: "confirmation.keyword"},
+		{name: "starts with a digit", mutate: func(c *Config) { c.Confirmation.Keyword = "1ok" }, wantErr: "confirmation.keyword"},
+		{name: "a service name", mutate: func(c *Config) { c.Confirmation.Keyword = "nginx" }, wantErr: "confirmation.keyword"},
+		{name: "a service alias", mutate: func(c *Config) { c.Confirmation.Keyword = "web" }, wantErr: "confirmation.keyword"},
+		{name: "prompt without the code", mutate: func(c *Config) { c.Confirmation.Prompt = "Reply {keyword}" }, wantErr: "{code}"},
+		{name: "negative window", mutate: func(c *Config) { c.Confirmation.Window = -time.Second }, wantErr: "confirmation.window"},
+		{name: "window under a second", mutate: func(c *Config) { c.Confirmation.Window = 500 * time.Millisecond }, wantErr: "confirmation.window"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validBase()
+			tt.mutate(cfg)
+
+			err := Validate(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate = %v, want an error naming %s", err, tt.wantErr)
+			}
+		})
+	}
+
+	// A keyword that is fine on its own, accents included.
+	for _, keyword := range []string{"ok", "sí", "yes2"} {
+		cfg := validBase()
+		cfg.Confirmation.Keyword = keyword
+		if err := Validate(cfg); err != nil {
+			t.Errorf("keyword %q: unexpected error %v", keyword, err)
+		}
+	}
+
+	// With confirmation off, a service may be called like the keyword.
+	cfg := validBase()
+	cfg.RequireConfirm = nil
+	cfg.Services["confirm"] = Service{Machine: "vps", Systemd: "confirm"}
+	if err := Validate(cfg); err != nil {
+		t.Errorf("service named confirm with confirmation off: unexpected error %v", err)
 	}
 }
 
@@ -498,11 +601,18 @@ func TestValidateCommandLists(t *testing.T) {
 
 	// Both lists are checked, and the error names the key and the culprit.
 	cases := []struct {
-		key    string
-		mutate func(*Config)
+		key     string
+		culprit string
+		mutate  func(*Config)
 	}{
-		{key: "enabled_commands", mutate: func(c *Config) { c.EnabledCommands = []string{"ping", "rebot"} }},
-		{key: "require_confirm", mutate: func(c *Config) { c.RequireConfirm = []string{"rebot"} }},
+		{key: "enabled_commands", culprit: `"rebot"`, mutate: func(c *Config) { c.EnabledCommands = []string{"ping", "rebot"} }},
+		{key: "require_confirm", culprit: `"rebot"`, mutate: func(c *Config) { c.RequireConfirm = []string{"rebot"} }},
+
+		// The keyword is read before the commands, so it must not be one.
+		{key: "confirmation.keyword", culprit: `"ping"`, mutate: func(c *Config) {
+			c.RequireConfirm = []string{"reboot"}
+			c.Confirmation.Keyword = "ping"
+		}},
 	}
 
 	for _, tc := range cases {
@@ -511,10 +621,10 @@ func TestValidateCommandLists(t *testing.T) {
 
 		err := ValidateCommandLists(cfg, known)
 		if err == nil {
-			t.Errorf("%s with rebot: expected an error", tc.key)
+			t.Errorf("%s with %s: expected an error", tc.key, tc.culprit)
 			continue
 		}
-		if !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), `"rebot"`) {
+		if !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.culprit) {
 			t.Errorf("error %q does not name %s and the command", err, tc.key)
 		}
 

@@ -603,9 +603,6 @@ func TestDangerousCommandsRunOneAtATime(t *testing.T) {
 	cfg.Categories = []config.Category{
 		{Label: "Careful", Type: "service", Commands: []string{"restart"}, Danger: true},
 	}
-	// The slot is what this test is about, so the messages run at once
-	// instead of asking for a code first.
-	cfg.RequireConfirm = []string{}
 	exec := newGatedExecutor("reboot")
 	sender := &mockSender{}
 	cmdr := New(cfg, exec, sender)
@@ -654,10 +651,7 @@ func TestDangerousCommandsRunOneAtATime(t *testing.T) {
 }
 
 func TestPanicInDangerousCommandFreesTheSlot(t *testing.T) {
-	cfg := testConfig()
-	cfg.RequireConfirm = []string{}
-	sender := &mockSender{}
-	cmdr := New(cfg, &mockExecutor{}, sender)
+	cmdr, sender := newTestCommander("")
 	panicOn(cmdr, command.ActionReboot)
 
 	cmdr.HandleCommand("reboot vps")
@@ -702,6 +696,14 @@ func (clock *fakeClock) advance(step time.Duration) {
 	clock.now = clock.now.Add(step)
 }
 
+// confirmingConfig is testConfig with the confirmation by message turned on
+// for the three commands that take a machine or a service down.
+func confirmingConfig() *config.Config {
+	cfg := testConfig()
+	cfg.RequireConfirm = []string{"reboot", "shutdown", "stop"}
+	return cfg
+}
+
 // newClockedCommander builds a commander for cfg whose message limiter and
 // confirmations read clock. Runs of blocked wait as in newGatedExecutor.
 func newClockedCommander(cfg *config.Config, blocked string, clock *fakeClock) (*Commander, *gatedExecutor, *mockSender) {
@@ -710,7 +712,7 @@ func newClockedCommander(cfg *config.Config, blocked string, clock *fakeClock) (
 	cmdr := New(cfg, exec, sender)
 
 	cmdr.messageLimiter = ratelimit.NewWithClock(cfg.Defaults.CommandsPerMinute(), time.Minute, clock.read)
-	cmdr.confirmations = command.NewConfirmations(clock.read)
+	cmdr.confirmations = command.NewConfirmations(cfg.Confirmation.WindowOrDefault(), clock.read)
 
 	return cmdr, exec, sender
 }
@@ -752,7 +754,7 @@ func lastReply(t *testing.T, sender *mockSender) capturedMessage {
 
 func TestDangerousMessagesAskForConfirmation(t *testing.T) {
 	for _, input := range []string{"reboot vps", "shutdown vps", "stop nginx", "poweroff mac", "stop ng"} {
-		cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+		cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", newFakeClock())
 
 		cmdr.Handle(context.Background(), input)
 
@@ -763,7 +765,7 @@ func TestDangerousMessagesAskForConfirmation(t *testing.T) {
 
 		// The reply names the parsed command, so an alias shows what it
 		// resolved to.
-		parsed, err := command.Parse(input, cmdr.aliases, cmdr.services)
+		parsed, err := command.Parse(input, cmdr.aliases, cmdr.services, "confirm")
 		if err != nil {
 			t.Fatalf("%s: %v", input, err)
 		}
@@ -780,7 +782,7 @@ func TestDangerousMessagesAskForConfirmation(t *testing.T) {
 
 func TestConfirmRunsThePendingCommandOnce(t *testing.T) {
 	clock := newFakeClock()
-	cmdr, exec, sender := newClockedCommander(testConfig(), "", clock)
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", clock)
 
 	cmdr.Handle(context.Background(), "reboot vps")
 	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
@@ -810,7 +812,7 @@ func TestConfirmRunsThePendingCommandOnce(t *testing.T) {
 }
 
 func TestConfirmWithAWrongCode(t *testing.T) {
-	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", newFakeClock())
 
 	cmdr.Handle(context.Background(), "reboot vps")
 	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
@@ -834,7 +836,7 @@ func TestConfirmWithAWrongCode(t *testing.T) {
 
 func TestConfirmAfterTheCodeExpired(t *testing.T) {
 	clock := newFakeClock()
-	cmdr, exec, sender := newClockedCommander(testConfig(), "", clock)
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", clock)
 
 	cmdr.Handle(context.Background(), "reboot vps")
 	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
@@ -851,7 +853,7 @@ func TestConfirmAfterTheCodeExpired(t *testing.T) {
 }
 
 func TestNewDangerousCommandReplacesThePendingOne(t *testing.T) {
-	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", newFakeClock())
 
 	cmdr.Handle(context.Background(), "reboot vps")
 	firstCode := confirmationCode(t, lastReply(t, sender), "reboot vps")
@@ -875,7 +877,7 @@ func TestNewDangerousCommandReplacesThePendingOne(t *testing.T) {
 }
 
 func TestRebootWithoutTargetIsNotConfirmed(t *testing.T) {
-	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "", newFakeClock())
 
 	// There is nothing to confirm: the reboot answers with its usage.
 	cmdr.Handle(context.Background(), "reboot")
@@ -918,7 +920,7 @@ func TestRequireConfirmReplacesTheDefault(t *testing.T) {
 }
 
 func TestExecuteDoesNotAskForConfirmation(t *testing.T) {
-	cmdr, exec, _ := newClockedCommander(testConfig(), "", newFakeClock())
+	cmdr, exec, _ := newClockedCommander(confirmingConfig(), "", newFakeClock())
 
 	// The panel asks in the browser before it posts to /execute.
 	resp := cmdr.Execute("reboot vps")
@@ -935,7 +937,7 @@ func TestExecuteDoesNotAskForConfirmation(t *testing.T) {
 }
 
 func TestConfirmedCommandStillWaitsForTheDangerSlot(t *testing.T) {
-	cmdr, exec, sender := newClockedCommander(testConfig(), "reboot", newFakeClock())
+	cmdr, exec, sender := newClockedCommander(confirmingConfig(), "reboot", newFakeClock())
 
 	cmdr.Handle(context.Background(), "shutdown vps")
 	code := confirmationCode(t, lastReply(t, sender), "shutdown vps")
@@ -1008,7 +1010,6 @@ func TestEmptyEnabledCommandsEnablesEverything(t *testing.T) {
 func TestInheritCarriesTheLimiterTheSlotAndTheStats(t *testing.T) {
 	clock := newFakeClock()
 	cfg := testConfig()
-	cfg.RequireConfirm = []string{}
 	old, oldExec, _ := newClockedCommander(cfg, "reboot", clock)
 
 	for range 20 {
@@ -1057,7 +1058,7 @@ func TestInheritCarriesTheLimiterTheSlotAndTheStats(t *testing.T) {
 
 func TestInheritKeepsAFreshLimiterWhenTheLimitChanged(t *testing.T) {
 	clock := newFakeClock()
-	old, _, _ := newClockedCommander(testConfig(), "", clock)
+	old, _, _ := newClockedCommander(confirmingConfig(), "", clock)
 
 	for range 20 {
 		old.Handle(context.Background(), "uptime")
@@ -1072,5 +1073,107 @@ func TestInheritKeepsAFreshLimiterWhenTheLimitChanged(t *testing.T) {
 	replacement.Handle(context.Background(), "uptime")
 	if runs := exec.count("uptime"); runs != 1 {
 		t.Errorf("uptime after raising the limit ran %d times, want 1", runs)
+	}
+}
+
+func TestDefaultConfigRunsDangerousMessagesDirectly(t *testing.T) {
+	// Confirmation is opt-in: neither the defaults nor a Config built in
+	// code turn it on.
+	fromDefaults := config.DefaultConfig()
+	fromDefaults.Services = testConfig().Services
+
+	for name, cfg := range map[string]*config.Config{"DefaultConfig": fromDefaults, "testConfig": testConfig()} {
+		cmdr, exec, sender := newClockedCommander(cfg, "", newFakeClock())
+
+		cmdr.Handle(context.Background(), "reboot vps")
+
+		if runs := exec.count("sudo reboot"); runs != 1 {
+			t.Errorf("%s: reboot vps ran %d times, want 1 without asking", name, runs)
+		}
+		if reply := lastReply(t, sender); reply.title == "⚠️ Confirmation needed" {
+			t.Errorf("%s: reboot vps asked for a code: %q", name, reply.message)
+		}
+
+		// With confirmation off, the keyword is not a command either.
+		cmdr.Handle(context.Background(), "confirm 1234")
+		if reply := lastReply(t, sender); reply.title != "❌ Parse Error" {
+			t.Errorf("%s: confirm with confirmation off answered %+v, want a parse error", name, reply)
+		}
+	}
+}
+
+func TestConfirmationKeywordFromTheConfiguration(t *testing.T) {
+	cfg := confirmingConfig()
+	cfg.Confirmation.Keyword = "ok"
+	cmdr, exec, sender := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+
+	request := lastReply(t, sender)
+	match := regexp.MustCompile("reply `ok ([0-9]{4})` within 60 s$").FindStringSubmatch(request.message)
+	if match == nil {
+		t.Fatalf("request %q does not ask for ok <code>", request.message)
+	}
+	code := match[1]
+
+	// The default word is not the keyword any more.
+	cmdr.Handle(context.Background(), "confirm "+code)
+	if runs := exec.count("sudo reboot"); runs != 0 {
+		t.Fatalf("confirm %s ran the reboot with keyword: ok", code)
+	}
+
+	cmdr.Handle(context.Background(), "ok "+code)
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("ok %s ran the reboot %d times, want 1", code, runs)
+	}
+}
+
+func TestConfirmationPromptFromTheConfiguration(t *testing.T) {
+	cfg := confirmingConfig()
+	cfg.Confirmation.Keyword = "yes"
+	cfg.Confirmation.Prompt = "Send {keyword} {code} in {seconds}s to run {command}"
+	cmdr, _, sender := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "shutdown vps")
+
+	request := lastReply(t, sender)
+	match := regexp.MustCompile(`^Send yes ([0-9]{4}) in 60s to run shutdown vps$`).FindStringSubmatch(request.message)
+	if match == nil {
+		t.Errorf("request %q, want the configured prompt filled in", request.message)
+	}
+	if request.title != "⚠️ Confirmation needed" || request.priority != 7 {
+		t.Errorf("request %+v, want the confirmation title and priority 7", request)
+	}
+}
+
+func TestConfirmationWindowFromTheConfiguration(t *testing.T) {
+	clock := newFakeClock()
+	cfg := confirmingConfig()
+	cfg.Confirmation.Window = 10 * time.Second
+	cmdr, exec, sender := newClockedCommander(cfg, "", clock)
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	request := lastReply(t, sender)
+	if !strings.HasSuffix(request.message, "within 10 s") {
+		t.Errorf("request %q, want it to say 10 s", request.message)
+	}
+	code := regexp.MustCompile("confirm ([0-9]{4})").FindStringSubmatch(request.message)[1]
+
+	clock.advance(11 * time.Second)
+	cmdr.Handle(context.Background(), "confirm "+code)
+	if reply := lastReply(t, sender); reply.message != "❌ No pending command for that code" {
+		t.Errorf("code at 11 s with window: 10s answered %q, want the no-pending reply", reply.message)
+	}
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("an expired code ran %d commands", runs)
+	}
+
+	// Inside the window the same flow runs the command.
+	cmdr.Handle(context.Background(), "reboot vps")
+	code = regexp.MustCompile("confirm ([0-9]{4})").FindStringSubmatch(lastReply(t, sender).message)[1]
+	clock.advance(10 * time.Second)
+	cmdr.Handle(context.Background(), "confirm "+code)
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("code at 10 s with window: 10s ran the reboot %d times, want 1", runs)
 	}
 }

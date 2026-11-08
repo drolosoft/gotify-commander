@@ -28,10 +28,11 @@ const (
 	ActionAnalytics   Action = "analytics"
 	ActionLocate      Action = "locate"
 
-	// ActionConfirm answers a confirmation request: "confirm 4821" runs
-	// the dangerous command that is waiting for that code. The code
-	// travels in Command.Target. It has no handler in the registry; the
-	// commander takes it before the lookup.
+	// ActionConfirm answers a confirmation request: "<keyword> 4821", with
+	// the keyword of the configuration ("confirm" by default), runs the
+	// command that is waiting for that code. The code travels in
+	// Command.Target. It has no handler in the registry; the commander
+	// takes it before the lookup.
 	ActionConfirm Action = "confirm"
 )
 
