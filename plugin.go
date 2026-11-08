@@ -28,6 +28,7 @@ import (
 	"github.com/drolosoft/gotify-commander/internal/commander"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/executor"
+	"github.com/drolosoft/gotify-commander/internal/ratelimit"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
 
@@ -80,9 +81,11 @@ type Plugin struct {
 
 	// executeSlots is a semaphore for POST /execute and executeLimiter its
 	// rate limit. Commands run real programs on the host, so the panel
-	// must not be able to start an unbounded number of them.
+	// must not be able to start an unbounded number of them. The limiter
+	// is the panel's own: commands sent as Gotify messages are counted by
+	// the commander in a separate budget.
 	executeSlots   chan struct{}
-	executeLimiter *rateLimiter
+	executeLimiter *ratelimit.Limiter
 
 	// newListener builds the stream listener for a configuration. It is a
 	// field so the tests can check the lock order without a Gotify server.
@@ -188,7 +191,7 @@ func NewGotifyPluginInstance(ctx plugin.UserContext) plugin.Plugin {
 	return &Plugin{
 		userCtx:        ctx,
 		executeSlots:   make(chan struct{}, maxConcurrentExecute),
-		executeLimiter: newRateLimiter(executeRateLimit, executeRateWindow),
+		executeLimiter: ratelimit.New(executeRateLimit, executeRateWindow),
 		newListener:    newGotifyListener,
 	}
 }

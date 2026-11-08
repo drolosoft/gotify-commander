@@ -626,37 +626,6 @@ func TestExecuteConcurrencyLimit(t *testing.T) {
 	}
 }
 
-func TestRateLimiterWindow(t *testing.T) {
-	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
-	limiter := newRateLimiter(2, time.Minute)
-	limiter.now = func() time.Time { return now }
-
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Fatal("first call refused")
-	}
-	now = now.Add(20 * time.Second)
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Fatal("second call refused")
-	}
-
-	allowed, retryAfter := limiter.Allow()
-	if allowed {
-		t.Fatal("third call within the minute allowed")
-	}
-	if retryAfter != 40*time.Second {
-		t.Errorf("retry after %s, want 40s (when the first call leaves the window)", retryAfter)
-	}
-
-	// Once the first call is a minute old, one more fits.
-	now = now.Add(40 * time.Second)
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Error("call refused after the oldest one left the window")
-	}
-	if allowed, _ := limiter.Allow(); allowed {
-		t.Error("window holds more calls than the limit")
-	}
-}
-
 // ─── Security headers and CSP ────────────────────────────────────────────────
 
 // noncePattern extracts the nonce from the Content-Security-Policy header.
