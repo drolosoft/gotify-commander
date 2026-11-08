@@ -10,8 +10,8 @@ Report security problems in private, not in a public issue: open a private
 security advisory on GitHub (Security tab, "Report a vulnerability").
 
 Include the plugin version (`go version -m gotify-commander.so` prints it),
-the Gotify version and the steps to reproduce. You will get an answer within
-seven days. Fixed issues are listed in `CHANGELOG.md` under Security.
+the Gotify version and the steps to reproduce. Fixed issues are listed in
+`CHANGELOG.md` under Security.
 
 ## Scope
 
