@@ -57,6 +57,7 @@ var commandAliases = map[string]Action{
 	"locate":       ActionLocate,
 	"where":        ActionLocate,
 	"location":     ActionLocate,
+	"confirm":      ActionConfirm,
 }
 
 // systemCommands are actions that default their target to "vps" when no target is given.
@@ -137,6 +138,16 @@ func Parse(input string, aliases map[string]string, services map[string]bool) (C
 
 // resolveTarget determines the target for an action given its args and alias map.
 func resolveTarget(action Action, args []string, aliases map[string]string) string {
+	// The argument of confirm is a code, not a name, so it is kept as
+	// typed: a code that happens to be a service alias must not turn
+	// into the service.
+	if action == ActionConfirm {
+		if len(args) == 0 {
+			return ""
+		}
+		return args[0]
+	}
+
 	// Actions with no meaningful target
 	if noTargetCommands[action] {
 		if len(args) > 0 {

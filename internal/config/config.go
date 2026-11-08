@@ -27,6 +27,20 @@ type Config struct {
 	Docker      DockerConfig         `yaml:"docker"`
 	Digest      DigestConfig         `yaml:"digest"`
 	WebURL      string               `yaml:"-"` // full control panel URL, set at runtime
+
+	// Which commands run, and which ones a message must confirm first.
+	//
+	// EnabledCommands lists the command names that run, from either the
+	// panel or a message; left out or empty, every command runs. One
+	// outside the list is answered as disabled and not counted.
+	//
+	// RequireConfirm lists the commands that a Gotify message does not run
+	// at once: the reply carries a code, and "confirm <code>" within 60 s
+	// runs it. Left out (or null), it is DefaultRequireConfirm; an explicit
+	// empty list, require_confirm: [], turns the confirmation off. Read it
+	// through ConfirmCommands. The panel asks in the browser instead.
+	EnabledCommands []string `yaml:"enabled_commands"`
+	RequireConfirm  []string `yaml:"require_confirm"`
 }
 
 // GotifyConfig holds Gotify server connection settings.
@@ -69,10 +83,10 @@ type Defaults struct {
 const DefaultReplayWindow = 5 * time.Minute
 
 // DefaultRateLimitPerMinute is the message limit when rate_limit_per_minute
-// is not set. It matches the panel's 10 per minute: enough for a person
-// tapping commands on a phone, not enough for a script with a stolen client
-// token to queue a flood of them.
-const DefaultRateLimitPerMinute = 10
+// is not set. Twenty a minute is enough for a person tapping commands on a
+// phone, confirmations included, and not enough for a script with a stolen
+// client token to queue a flood of them. The panel's limit is separate.
+const DefaultRateLimitPerMinute = 20
 
 // CommandsPerMinute returns the message rate limit, with 0 replaced by
 // DefaultRateLimitPerMinute.
@@ -117,6 +131,11 @@ func DefaultConfig() *Config {
 		},
 		SSHTargets: make(map[string]SSHTarget),
 		Services:   make(map[string]Service),
+
+		// Gotify stores the configuration by marshalling what it parsed,
+		// and a nil list marshals as [], which reads back as "confirmation
+		// off". Filling the default here keeps it through a save.
+		RequireConfirm: DefaultRequireConfirm(),
 	}
 }
 
@@ -202,6 +221,52 @@ func ValidateCategoryCommands(cfg *Config, known []string) error {
 			if !knownSet[name] {
 				return fmt.Errorf("category %q: unknown command %q", category.Label, name)
 			}
+		}
+	}
+
+	// The plugin calls this one function with the registry's names, so the
+	// two top-level command lists are checked from here as well.
+	return ValidateCommandLists(cfg, known)
+}
+
+// ─── enabled_commands and require_confirm ────────────────────────────────────
+
+// DefaultRequireConfirm returns the commands a message must confirm when
+// require_confirm is left out: the ones that take a machine or a service
+// down. It is a new slice each time, so a caller cannot change the default.
+func DefaultRequireConfirm() []string {
+	return []string{"reboot", "shutdown", "stop"}
+}
+
+// ConfirmCommands returns the commands a message must confirm. A nil
+// RequireConfirm, a configuration that never set it, means the default; an
+// empty one that was set on purpose means none.
+func (cfg *Config) ConfirmCommands() []string {
+	if cfg.RequireConfirm == nil {
+		return DefaultRequireConfirm()
+	}
+	return cfg.RequireConfirm
+}
+
+// ValidateCommandLists checks that every name in enabled_commands and
+// require_confirm is one of known, the names the command registry handles.
+// A typo in enabled_commands would disable the command the user meant, and
+// one in require_confirm would let it run without asking.
+func ValidateCommandLists(cfg *Config, known []string) error {
+	knownSet := make(map[string]bool, len(known))
+	for _, name := range known {
+		knownSet[name] = true
+	}
+
+	for _, name := range cfg.EnabledCommands {
+		if !knownSet[name] {
+			return fmt.Errorf("enabled_commands: unknown command %q", name)
+		}
+	}
+
+	for _, name := range cfg.RequireConfirm {
+		if !knownSet[name] {
+			return fmt.Errorf("require_confirm: unknown command %q", name)
 		}
 	}
 
