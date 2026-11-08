@@ -200,6 +200,41 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesStatsToANewCommander(t *testing.T) {
+	old, _ := newTestCommander("")
+	old.HandleCommand("ping")
+	snapshot := old.Snapshot()
+
+	if snapshot.CommandCount != 1 || snapshot.LastCommand == "" || snapshot.LastTime.IsZero() {
+		t.Fatalf("snapshot after ping = %+v, want one command with its name and time", snapshot)
+	}
+
+	// Both commanders start within microseconds of each other; an Enable an
+	// hour ago is what tells a carried uptime from a fresh one.
+	snapshot.StartTime = snapshot.StartTime.Add(-time.Hour)
+
+	// The plugin builds a new commander on every saved configuration and
+	// hands it the old one's stats, so the counters and the uptime go on.
+	replacement, _ := newTestCommander("")
+	replacement.SetStats(snapshot)
+
+	count, last, lastTime, uptime := replacement.Stats()
+	if count != 1 {
+		t.Errorf("count after SetStats = %d, want 1", count)
+	}
+	if last != snapshot.LastCommand || !lastTime.Equal(snapshot.LastTime) {
+		t.Errorf("last command after SetStats = %q at %v, want %q at %v", last, lastTime, snapshot.LastCommand, snapshot.LastTime)
+	}
+	if uptime < time.Hour {
+		t.Errorf("uptime after SetStats = %v, want it counted from %v", uptime, snapshot.StartTime)
+	}
+
+	replacement.HandleCommand("ping")
+	if count, _, _, _ := replacement.Stats(); count != 2 {
+		t.Errorf("count after one more ping = %d, want 2", count)
+	}
+}
+
 // panicOn replaces the handler of action with one that panics.
 func panicOn(cmd *Commander, action command.Action) {
 	cmd.registry.Register(action, func(command.Command) command.Response {

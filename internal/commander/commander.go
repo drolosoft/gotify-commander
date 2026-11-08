@@ -234,6 +234,44 @@ func (c *Commander) sendDetached(resp command.Response) {
 	c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
 }
 
+// Stats is a copy of the counters of a Commander. The plugin builds a new
+// Commander whenever the configuration is saved and hands it the old one's
+// Stats, so the plugin page and /health do not go back to zero.
+type Stats struct {
+	CommandCount int
+	LastCommand  string
+	LastTime     time.Time
+
+	// StartTime is when the plugin was enabled, not when this Commander was
+	// built; the uptime counts from it.
+	StartTime time.Time
+}
+
+// Snapshot returns a copy of the counters, for SetStats on a new Commander.
+func (c *Commander) Snapshot() Stats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return Stats{
+		CommandCount: c.commandCount,
+		LastCommand:  c.lastCommand,
+		LastTime:     c.lastTime,
+		StartTime:    c.startTime,
+	}
+}
+
+// SetStats replaces the counters with stats, which usually come from the
+// Snapshot of the Commander this one replaces.
+func (c *Commander) SetStats(stats Stats) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.commandCount = stats.CommandCount
+	c.lastCommand = stats.LastCommand
+	c.lastTime = stats.LastTime
+	c.startTime = stats.StartTime
+}
+
 // Stats returns thread-safe counters and timing info.
 func (c *Commander) Stats() (count int, last string, lastTime time.Time, uptime time.Duration) {
 	c.mu.RLock()
