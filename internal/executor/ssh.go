@@ -2,20 +2,30 @@ package executor
 
 import (
 	"context"
+	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"net"
 	"os"
-	"strings"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // SSHExecutor runs commands on a remote machine via SSH.
 type SSHExecutor struct {
 	target config.SSHTarget
+
+	// KnownHostsFile is the OpenSSH known_hosts file the remote host key is
+	// checked against. Empty means ~/.ssh/known_hosts of the user running the
+	// plugin. A host that is missing or whose key differs is refused.
+	KnownHostsFile string
+
 	client *ssh.Client
 	mu     sync.Mutex
 }
@@ -43,6 +53,12 @@ func (s *SSHExecutor) Run(ctx context.Context, name string, args ...string) (Res
 
 	result, err := s.runSession(ctx, client, name, args...)
 	if err != nil {
+		// A timeout says nothing about the connection, and running the
+		// command again with a finished context would fail anyway.
+		if ctx.Err() != nil {
+			return Result{}, err
+		}
+
 		// Session may have failed because the connection is stale; try once more.
 		s.mu.Lock()
 		s.client = nil
@@ -65,12 +81,9 @@ func (s *SSHExecutor) runSession(ctx context.Context, client *ssh.Client, name s
 	}
 	defer session.Close()
 
-	// Build the full command string. Arguments are expected to already be
-	// sanitized by the security layer before reaching the executor.
-	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, name)
-	parts = append(parts, args...)
-	cmdStr := strings.Join(parts, " ")
+	// The SSH protocol carries one command line that the remote user's shell
+	// parses, so every word is quoted: an argument cannot add a command.
+	cmdStr := remoteCommand(name, args...)
 
 	type outcome struct {
 		result Result
@@ -139,18 +152,23 @@ func (s *SSHExecutor) getClient() (*ssh.Client, error) {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 
+	addr := net.JoinHostPort(s.target.Host, strconv.Itoa(s.target.Port))
+
+	hostKeyCallback, hostKeyAlgorithms, err := s.hostKeyCheck(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	sshCfg := &ssh.ClientConfig{
 		User: s.target.User,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		// InsecureIgnoreHostKey is acceptable for a local/trusted Mac Mini.
-		// A future improvement could use known_hosts verification.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec
-		Timeout:         10 * time.Second,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           10 * time.Second,
 	}
 
-	addr := net.JoinHostPort(s.target.Host, fmt.Sprintf("%d", s.target.Port))
 	client, err := ssh.Dial("tcp", addr, sshCfg)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
@@ -169,4 +187,80 @@ func (s *SSHExecutor) Close() {
 		_ = s.client.Close()
 		s.client = nil
 	}
+}
+
+// knownHostsPath returns KnownHostsFile, or ~/.ssh/known_hosts of the user
+// running the plugin when it is empty.
+func (s *SSHExecutor) knownHostsPath() (string, error) {
+	if s.KnownHostsFile != "" {
+		return s.KnownHostsFile, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("find known_hosts: %w", err)
+	}
+
+	return filepath.Join(home, ".ssh", "known_hosts"), nil
+}
+
+// hostKeyCheck loads the known_hosts file and returns the callback that
+// verifies addr's host key, plus the key algorithms recorded for addr.
+//
+// The algorithms matter: without them the client offers RSA and ECDSA before
+// Ed25519, the server answers with a key type the file may not hold, and a
+// correct entry is reported as a mismatch.
+func (s *SSHExecutor) hostKeyCheck(addr string) (ssh.HostKeyCallback, []string, error) {
+	path, err := s.knownHostsPath()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	callback, err := knownhosts.New(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load known_hosts %q (add the host with ssh-keyscan): %w", path, err)
+	}
+
+	algorithms, err := knownHostAlgorithms(callback, addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("host %s is not in known_hosts %q (add it with ssh-keyscan): %w", addr, path, err)
+	}
+
+	return callback, algorithms, nil
+}
+
+// knownHostAlgorithms asks callback which keys it holds for addr by offering
+// a key that cannot match. knownhosts answers with a KeyError listing the
+// recorded keys; an empty list means the host is unknown.
+func knownHostAlgorithms(callback ssh.HostKeyCallback, addr string) ([]string, error) {
+	probeKey, err := ssh.NewPublicKey(make(ed25519.PublicKey, ed25519.PublicKeySize))
+	if err != nil {
+		return nil, err
+	}
+
+	// The remote address is only read when the hostname is empty, but it must
+	// still parse as host:port.
+	probeRemote := &net.TCPAddr{IP: net.IPv4zero}
+
+	var keyError *knownhosts.KeyError
+	err = callback(addr, probeRemote, probeKey)
+	if !errors.As(err, &keyError) {
+		return nil, fmt.Errorf("unexpected known_hosts answer: %v", err)
+	}
+	if len(keyError.Want) == 0 {
+		return nil, keyError
+	}
+
+	var algorithms []string
+	for _, known := range keyError.Want {
+		// An "ssh-rsa" entry is a key type, not an algorithm: the SHA-2
+		// signatures are what the client negotiates for it.
+		if known.Key.Type() == ssh.KeyAlgoRSA {
+			algorithms = append(algorithms, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256)
+			continue
+		}
+		algorithms = append(algorithms, known.Key.Type())
+	}
+
+	return algorithms, nil
 }

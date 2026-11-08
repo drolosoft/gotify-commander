@@ -2,7 +2,17 @@ package command
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,16 +23,41 @@ import (
 	"github.com/drolosoft/gotify-commander/internal/security"
 )
 
+// Version is the plugin version sent in the User-Agent of outgoing HTTP
+// requests. The root package sets it at startup; "dev" marks a build that did
+// not.
+var Version = "dev"
+
+// nominatimReverseURL is OpenStreetMap's reverse geocoding endpoint.
+const nominatimReverseURL = "https://nominatim.openstreetmap.org/reverse"
+
+// geocodeTimeout bounds a whole reverse geocoding request, body included.
+const geocodeTimeout = 15 * time.Second
+
+// maxGeocodeBody is the most of a Nominatim answer that is read. A reverse
+// lookup is a few kilobytes; anything bigger is not an answer to parse.
+const maxGeocodeBody = 1 << 20
+
 // Builtins holds dependencies for all built-in command handlers.
 type Builtins struct {
 	cfg     *config.Config
 	exec    executor.Executor
 	sshExec executor.Executor // nil until SSH wired in Task 12
+
+	// httpClient and nominatimURL serve the locate command; tests point the
+	// URL at a local server.
+	httpClient   *http.Client
+	nominatimURL string
 }
 
 // NewBuiltins creates a Builtins instance with the given config and executor.
 func NewBuiltins(cfg *config.Config, exec executor.Executor) *Builtins {
-	return &Builtins{cfg: cfg, exec: exec}
+	return &Builtins{
+		cfg:          cfg,
+		exec:         exec,
+		httpClient:   &http.Client{Timeout: geocodeTimeout},
+		nominatimURL: nominatimReverseURL,
+	}
 }
 
 // SetSSHExecutor sets the SSH executor for Mac targets.
@@ -726,17 +761,43 @@ func (b *Builtins) Updates(cmd Command) Response {
 
 // ─── 19. Certs ───────────────────────────────────────────────────────────────
 
+// letsencryptLive is where certbot keeps one directory per certificate.
+const letsencryptLive = "/etc/letsencrypt/live"
+
+// Certs lists every Let's Encrypt certificate with its expiry date. find and
+// openssl run directly, one openssl per certificate, so no path or domain
+// name ever passes through a shell.
 func (b *Builtins) Certs(cmd Command) Response {
 	ctx, cancel := b.timeout()
 	defer cancel()
 
-	script := `sudo find /etc/letsencrypt/live -name cert.pem 2>/dev/null | sort | while read d; do domain=$(basename $(dirname "$d")); expiry=$(sudo openssl x509 -enddate -noout -in "$d" 2>/dev/null | cut -d= -f2); echo "$domain: $expiry"; done`
-	result, err := b.exec.Run(ctx, "bash", "-c", script)
+	result, err := b.exec.Run(ctx, "sudo", "find", letsencryptLive, "-name", "cert.pem")
 	if err != nil {
 		return errorResponse("Certs Failed", err.Error())
 	}
 
-	output := strings.TrimSpace(result.Output)
+	// stdout and stderr arrive together, so only lines that are certificate
+	// paths count; find's complaints about unreadable directories do not.
+	var paths []string
+	for _, line := range strings.Split(result.Output, "\n") {
+		if strings.HasPrefix(line, letsencryptLive+"/") && strings.HasSuffix(line, "/cert.pem") {
+			paths = append(paths, line)
+		}
+	}
+	sort.Strings(paths)
+
+	var lines []string
+	for _, path := range paths {
+		expiry, err := b.certExpiry(ctx, path)
+		if err != nil {
+			return errorResponse("Certs Failed", err.Error())
+		}
+
+		domain := filepath.Base(filepath.Dir(path))
+		lines = append(lines, domain+": "+expiry)
+	}
+
+	output := strings.Join(lines, "\n")
 	if output == "" {
 		output = "No certificates found in /etc/letsencrypt/live/"
 	}
@@ -746,6 +807,22 @@ func (b *Builtins) Certs(cmd Command) Response {
 		Message:  fmt.Sprintf("🔒 SSL Certificates\n%s", output),
 		Priority: 3,
 	}
+}
+
+// certExpiry returns the notAfter date openssl prints for the certificate at
+// path, or "" when openssl cannot read it.
+func (b *Builtins) certExpiry(ctx context.Context, path string) (string, error) {
+	result, err := b.exec.Run(ctx, "sudo", "openssl", "x509", "-enddate", "-noout", "-in", path)
+	if err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(result.Output, "\n") {
+		if expiry, found := strings.CutPrefix(line, "notAfter="); found {
+			return strings.TrimSpace(expiry), nil
+		}
+	}
+	return "", nil
 }
 
 // ─── 20. Connections ─────────────────────────────────────────────────────────
@@ -773,6 +850,47 @@ func (b *Builtins) Connections(cmd Command) Response {
 
 // ─── 21. Traffic ────────────────────────────────────────────────────────────
 
+// trafficFilterScript copies the nginx access log lines that mention a domain
+// into a file. It is the one shell left in the builtins: the logs are far
+// larger than the executor's output cap, so they must go from zcat to the file
+// without passing through Go. The script is a constant; the domain ($1) and the
+// file ($2) arrive as positional arguments and are never parsed as code.
+const trafficFilterScript = `sudo zcat -f /var/log/nginx/access.log* 2>/dev/null | grep -i -F -e "$1" > "$2"`
+
+// ansiEscape matches the terminal colour and cursor codes rhit prints.
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// rhitProgress matches rhit's "123 / 456" progress lines.
+var rhitProgress = regexp.MustCompile(`[0-9] / [0-9]`)
+
+// rhitArgs returns the rhit arguments shared by both traffic reports, for the
+// given log path and date range.
+func rhitArgs(logPath, dateRange string) []string {
+	return []string{"rhit", logPath, "--color", "no", "-s", "2xx,3xx", "-d", dateRange, "--length", "10", "-f", "date,status,ref"}
+}
+
+// cleanRhitOutput removes colour codes, progress lines and blank lines from
+// rhit's output, keeping one trailing newline like the grep it replaces.
+func cleanRhitOutput(output string) string {
+	output = ansiEscape.ReplaceAllString(output, "")
+	output = strings.ReplaceAll(output, "\r", "\n")
+
+	var kept []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" || rhitProgress.MatchString(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+
+	if len(kept) == 0 {
+		return ""
+	}
+	return strings.Join(kept, "\n") + "\n"
+}
+
+// Traffic reports nginx traffic of the last three months with rhit, for one
+// site when a service is given and for all sites otherwise.
 func (b *Builtins) Traffic(cmd Command) Response {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -785,74 +903,97 @@ func (b *Builtins) Traffic(cmd Command) Response {
 		now.Format("2006/01/02"))
 
 	if cmd.Target != "" {
-		// Per-site traffic: resolve service name to domain
-		domain := cmd.Target
-		if svc, ok := b.cfg.Services[cmd.Target]; ok && svc.Domain != "" {
-			domain = svc.Domain
-		}
-		// Before using domain in the shell script, validate it
-		if err := security.ValidateInput(domain); err != nil {
-			return errorResponse("Traffic Failed", "invalid service name: "+err.Error())
-		}
-		// Filter logs for this domain into temp file, then run rhit on it
-		script := fmt.Sprintf(
-			"tmpf=$(mktemp /tmp/rhit-XXXXXX.log) && sudo zcat -f /var/log/nginx/access.log* 2>/dev/null | grep -i '%s' > \"$tmpf\" && sudo rhit \"$tmpf\" --color no -s 2xx,3xx -d '%s' --length 10 -f date,status,ref 2>&1 | sed 's/\\x1b\\[[0-9;]*[a-zA-Z]//g' | tr '\\r' '\\n' | grep -v '[0-9] / [0-9]' | grep -v '^[[:space:]]*$'; rm -f \"$tmpf\"",
-			domain, dateRange)
-		result, err := b.exec.Run(ctx, "bash", "-c", script)
-		if err != nil {
-			return errorResponse("Traffic Failed", err.Error())
-		}
-		output := result.Output
-		if output == "" || strings.Contains(output, "0 hits") {
-			output = "No traffic found for " + domain
-		}
-		return Response{
-			Title:   fmt.Sprintf("📈 %s Traffic", domain),
-			Message: fmt.Sprintf("📈 %s (last 3 months)\n%s", domain, output),
-			Priority: 3,
-		}
+		return b.siteTraffic(ctx, cmd.Target, dateRange)
 	}
 
 	// All traffic, last 3 months
-	result, err := b.exec.Run(ctx, "bash", "-c", "sudo rhit /var/log/nginx/ --color no -s 2xx,3xx -d '"+dateRange+"' --length 10 -f date,status,ref 2>&1 | sed 's/\\x1b\\[[0-9;]*[a-zA-Z]//g' | tr '\\r' '\\n' | grep -v '[0-9] / [0-9]' | grep -v '^[[:space:]]*$'")
+	result, err := b.exec.Run(ctx, "sudo", rhitArgs("/var/log/nginx/", dateRange)...)
 	if err != nil {
 		return errorResponse("Traffic Failed", err.Error())
 	}
 	return Response{
 		Title:    "📈 Traffic",
-		Message:  fmt.Sprintf("📈 All Traffic (last 3 months)\n%s", result.Output),
+		Message:  fmt.Sprintf("📈 All Traffic (last 3 months)\n%s", cleanRhitOutput(result.Output)),
+		Priority: 3,
+	}
+}
+
+// siteTraffic filters the access logs for one service's domain into a temp
+// file and runs rhit on it. The file is removed when the report returns,
+// timeout included.
+func (b *Builtins) siteTraffic(ctx context.Context, target, dateRange string) Response {
+	// Per-site traffic: resolve service name to domain
+	domain := target
+	if svc, ok := b.cfg.Services[target]; ok && svc.Domain != "" {
+		domain = svc.Domain
+	}
+
+	// The domain is only ever an argument, but a name with shell or grep
+	// syntax in it is a mistake worth refusing before touching the logs.
+	if err := security.ValidateInput(domain); err != nil {
+		return errorResponse("Traffic Failed", "invalid service name: "+err.Error())
+	}
+
+	tempFile, err := os.CreateTemp("", "rhit-*.log")
+	if err != nil {
+		return errorResponse("Traffic Failed", err.Error())
+	}
+	tempPath := tempFile.Name()
+	tempFile.Close()
+	defer os.Remove(tempPath)
+
+	// grep exits 1 when no line matches; like the && chain this replaces,
+	// that means there is nothing for rhit to read.
+	filter, err := b.exec.Run(ctx, "bash", "-c", trafficFilterScript, "gotify-traffic", domain, tempPath)
+	if err != nil {
+		return errorResponse("Traffic Failed", err.Error())
+	}
+
+	output := ""
+	if filter.ExitCode == 0 {
+		result, err := b.exec.Run(ctx, "sudo", rhitArgs(tempPath, dateRange)...)
+		if err != nil {
+			return errorResponse("Traffic Failed", err.Error())
+		}
+		output = cleanRhitOutput(result.Output)
+	}
+
+	if output == "" || strings.Contains(output, "0 hits") {
+		output = "No traffic found for " + domain
+	}
+	return Response{
+		Title:    fmt.Sprintf("📈 %s Traffic", domain),
+		Message:  fmt.Sprintf("📈 %s (last 3 months)\n%s", domain, output),
 		Priority: 3,
 	}
 }
 
 // ─── 22. Analytics ──────────────────────────────────────────────────────────
 
+// goaccessSummary maps the keys of goaccess's "general" CSV rows to the label
+// each one gets, in the order goaccess prints them.
+var goaccessSummary = map[string]string{
+	"date_time":        "Generated: ",
+	"total_requests":   "Total requests: ",
+	"unique_visitors":  "Unique visitors: ",
+	"unique_files":     "Unique pages: ",
+	"bandwidth":        "Bandwidth: ",
+	"unique_not_found": "404 errors: ",
+}
+
+// Analytics runs goaccess on today's access log and summarises its CSV.
 func (b *Builtins) Analytics(cmd Command) Response {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// GoAccess CSV → parse with python for reliable extraction
-	script := `sudo goaccess /var/log/nginx/access.log --log-format=COMBINED --no-term-resolver --no-color --output-format csv -o - 2>/dev/null | python3 -c "
-import sys, csv
-reader = csv.reader(sys.stdin)
-out = []
-for row in reader:
-    if len(row) >= 12 and row[2] == 'general':
-        k, v = row[11], row[10]
-        if k == 'date_time': out.append('Generated: ' + v)
-        elif k == 'total_requests': out.append('Total requests: ' + v)
-        elif k == 'unique_visitors': out.append('Unique visitors: ' + v)
-        elif k == 'unique_files': out.append('Unique pages: ' + v)
-        elif k == 'bandwidth': out.append('Bandwidth: ' + v + ' bytes')
-        elif k == 'unique_not_found': out.append('404 errors: ' + v)
-print(chr(10).join(out))
-"`
-	result, err := b.exec.Run(ctx, "bash", "-c", script)
+	result, err := b.exec.Run(ctx, "sudo", "goaccess", "/var/log/nginx/access.log",
+		"--log-format=COMBINED", "--no-term-resolver", "--no-color",
+		"--output-format", "csv", "-o", "-")
 	if err != nil {
 		return errorResponse("Analytics Failed", err.Error())
 	}
 
-	output := strings.TrimSpace(result.Output)
+	output := parseGoaccessSummary(result.Output)
 	if output == "" {
 		output = "No analytics data available. Is goaccess installed?"
 	}
@@ -864,8 +1005,97 @@ print(chr(10).join(out))
 	}
 }
 
+// parseGoaccessSummary picks the summary figures out of goaccess CSV output.
+// Each line is parsed on its own and unreadable lines are skipped, because
+// goaccess's stderr arrives mixed into the same text.
+func parseGoaccessSummary(output string) string {
+	var lines []string
+
+	for _, line := range strings.Split(output, "\n") {
+		reader := csv.NewReader(strings.NewReader(line))
+		reader.FieldsPerRecord = -1
+		reader.LazyQuotes = true
+
+		row, err := reader.Read()
+		if err != nil || len(row) < 12 || row[2] != "general" {
+			continue
+		}
+
+		key := row[11]
+		value := row[10]
+		label, known := goaccessSummary[key]
+		if !known {
+			continue
+		}
+
+		if key == "bandwidth" {
+			value += " bytes"
+		}
+		lines = append(lines, label+value)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 // ─── 23. Locate ─────────────────────────────────────────────────────────────
 
+// nominatimPlace is the part of a Nominatim reverse answer the message uses.
+// Nominatim sends coordinates as strings, and "error" instead of an address
+// for a point it cannot place, such as the open sea.
+type nominatimPlace struct {
+	Lat     string            `json:"lat"`
+	Lon     string            `json:"lon"`
+	Error   string            `json:"error"`
+	Address map[string]string `json:"address"`
+}
+
+// markdownEscaper backslash-escapes the characters Gotify's markdown would
+// read as formatting, links, headings or HTML, and folds line breaks into
+// spaces so OSM text cannot start a line of its own.
+var markdownEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	"*", `\*`,
+	"_", `\_`,
+	"[", `\[`,
+	"]", `\]`,
+	"(", `\(`,
+	")", `\)`,
+	"`", "\\`",
+	"#", `\#`,
+	"<", `\<`,
+	">", `\>`,
+	"\r\n", " ",
+	"\r", " ",
+	"\n", " ",
+)
+
+// escapeMarkdown makes OSM-provided text safe to insert into the message.
+func escapeMarkdown(text string) string {
+	return markdownEscaper.Replace(text)
+}
+
+// parseCoordinate parses text as a finite number within ±limit.
+func parseCoordinate(text string, limit float64) (float64, bool) {
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false
+	}
+	if value < -limit || value > limit {
+		return 0, false
+	}
+	return value, true
+}
+
+// formatCoordinate prints a coordinate in plain decimal notation, the form
+// Nominatim and the OSM links expect.
+func formatCoordinate(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// Locate reverse geocodes "locate <lat> <lon>" with OpenStreetMap Nominatim
+// and answers with the address, a map link and a map tile. The coordinates
+// are personal data: they are sent to Nominatim and back to the user, and
+// never logged.
 func (b *Builtins) Locate(cmd Command) Response {
 	// Parse lat,lon from raw input: "locate 40.4168 -3.7038"
 	parts := strings.Fields(cmd.Raw)
@@ -875,68 +1105,24 @@ func (b *Builtins) Locate(cmd Command) Response {
 	lat := parts[1]
 	lon := parts[2]
 
-	if _, err := strconv.ParseFloat(lat, 64); err != nil {
-		return errorResponse("Locate", "invalid latitude: "+lat)
+	latitude, ok := parseCoordinate(lat, 90)
+	if !ok {
+		return errorResponse("Locate", "invalid latitude: "+lat+" (must be a number from -90 to 90)")
 	}
-	if _, err := strconv.ParseFloat(lon, 64); err != nil {
-		return errorResponse("Locate", "invalid longitude: "+lon)
+	longitude, ok := parseCoordinate(lon, 180)
+	if !ok {
+		return errorResponse("Locate", "invalid longitude: "+lon+" (must be a number from -180 to 180)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), geocodeTimeout)
 	defer cancel()
 
-	// Use python3 to parse JSON properly — avoid fmt.Sprintf to prevent % conflicts
-	apiURL := "https://nominatim.openstreetmap.org/reverse?format=json&lat=" + lat + "&lon=" + lon + "&zoom=18&addressdetails=1"
-	pyScript := `import sys, json, math
-d = json.load(sys.stdin)
-a = d.get('address', {})
-lt = str(d.get('lat',''))
-ln = str(d.get('lon',''))
-lines = []
-if a.get('road'):
-    r = a['road']
-    if a.get('house_number'): r = a['house_number'] + ' ' + r
-    lines.append(r)
-if a.get('neighbourhood'): lines.append(a['neighbourhood'])
-if a.get('town') or a.get('city'): lines.append(a.get('city', a.get('town', '')))
-if a.get('province'): lines.append(a['province'])
-if a.get('state'): lines.append(a['state'])
-if a.get('postcode'): lines.append(a['postcode'])
-if a.get('country'): lines.append(a['country'])
-out = []
-out.append('**Address:** ' + ', '.join(lines))
-out.append('**Coordinates:** ' + lt + ', ' + ln)
-if a.get('road'): out.append('**Street:** ' + (a.get('house_number','') + ' ' + a['road']).strip())
-if a.get('neighbourhood'): out.append('**Neighbourhood:** ' + a['neighbourhood'])
-if a.get('town') or a.get('city'): out.append('**City:** ' + a.get('city', a.get('town','')))
-if a.get('province'): out.append('**Province:** ' + a['province'])
-if a.get('state'): out.append('**State:** ' + a['state'])
-if a.get('postcode'): out.append('**Postal code:** ' + a['postcode'])
-if a.get('country'): out.append('**Country:** ' + a['country'])
-if a.get('country_code'): out.append('**Country code:** ' + a['country_code'].upper())
-mapurl = 'https://www.openstreetmap.org/?mlat=' + lt + '&mlon=' + ln + '&zoom=17'
-out.append('')
-out.append('[Open in map](' + mapurl + ')')
-# Static map image via OSM embed
-z = 15
-lat_f = float(lt)
-lon_f = float(ln)
-n = 2 ** z
-xtile = int((lon_f + 180.0) / 360.0 * n)
-ytile = int((1.0 - math.log(math.tan(math.radians(lat_f)) + 1.0/math.cos(math.radians(lat_f))) / math.pi) / 2.0 * n)
-tileurl = 'https://tile.openstreetmap.org/' + str(z) + '/' + str(xtile) + '/' + str(ytile) + '.png'
-out.append('')
-out.append('![map](' + tileurl + ')')
-print(chr(10).join(out))
-`
-	script := `curl -s -H "User-Agent: gotify-commander/1.0" "` + apiURL + `" | python3 -c "` + pyScript + `"`
-
-	result, err := b.exec.Run(ctx, "bash", "-c", script)
+	place, err := b.reverseGeocode(ctx, latitude, longitude)
 	if err != nil {
 		return errorResponse("Locate Failed", err.Error())
 	}
 
-	output := strings.TrimSpace(result.Output)
+	output := formatPlace(place)
 	if output == "" {
 		output = "Location not found"
 	}
@@ -947,4 +1133,143 @@ print(chr(10).join(out))
 		Priority: 3,
 		Markdown: true,
 	}
+}
+
+// reverseGeocode asks Nominatim for the place at latitude, longitude. Errors
+// never include the request URL, since it carries the coordinates.
+func (b *Builtins) reverseGeocode(ctx context.Context, latitude, longitude float64) (nominatimPlace, error) {
+	query := url.Values{}
+	query.Set("format", "json")
+	query.Set("lat", formatCoordinate(latitude))
+	query.Set("lon", formatCoordinate(longitude))
+	query.Set("zoom", "18")
+	query.Set("addressdetails", "1")
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, b.nominatimURL+"?"+query.Encode(), nil)
+	if err != nil {
+		return nominatimPlace{}, errors.New("could not build the geocoding request")
+	}
+
+	// Nominatim's usage policy asks for a User-Agent naming the application.
+	request.Header.Set("User-Agent", "gotify-commander/"+Version+" (+https://github.com/drolosoft/gotify-commander)")
+
+	response, err := b.httpClient.Do(request)
+	if err != nil {
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			err = urlError.Err
+		}
+		return nominatimPlace{}, fmt.Errorf("geocoding request failed: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return nominatimPlace{}, fmt.Errorf("geocoding service answered %s", response.Status)
+	}
+
+	var place nominatimPlace
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxGeocodeBody)).Decode(&place); err != nil {
+		return nominatimPlace{}, fmt.Errorf("could not read the geocoding answer: %w", err)
+	}
+	return place, nil
+}
+
+// formatPlace renders a Nominatim place as the markdown message, line for
+// line as the former python script did. It returns "" when Nominatim found
+// no place or sent coordinates that are not numbers.
+func formatPlace(place nominatimPlace) string {
+	if place.Error != "" {
+		return ""
+	}
+
+	latitude, latitudeOK := parseCoordinate(place.Lat, 90)
+	longitude, longitudeOK := parseCoordinate(place.Lon, 180)
+	if !latitudeOK || !longitudeOK {
+		return ""
+	}
+	lt := formatCoordinate(latitude)
+	ln := formatCoordinate(longitude)
+
+	// Every address part comes from OSM contributors, so each one is escaped
+	// once here and used escaped below.
+	address := make(map[string]string, len(place.Address))
+	for key, value := range place.Address {
+		address[key] = escapeMarkdown(value)
+	}
+
+	road := address["road"]
+	houseNumber := address["house_number"]
+	neighbourhood := address["neighbourhood"]
+	province := address["province"]
+	state := address["state"]
+	postcode := address["postcode"]
+	country := address["country"]
+	countryCode := address["country_code"]
+	city := address["city"]
+	if city == "" {
+		city = address["town"]
+	}
+
+	var addressParts []string
+	if road != "" {
+		street := road
+		if houseNumber != "" {
+			street = houseNumber + " " + road
+		}
+		addressParts = append(addressParts, street)
+	}
+	for _, part := range []string{neighbourhood, city, province, state, postcode, country} {
+		if part != "" {
+			addressParts = append(addressParts, part)
+		}
+	}
+
+	var out []string
+	out = append(out, "**Address:** "+strings.Join(addressParts, ", "))
+	out = append(out, "**Coordinates:** "+lt+", "+ln)
+
+	// Each detail line appears only when OSM has that part, in this order.
+	details := []struct {
+		label string
+		value string
+	}{
+		{"Street", strings.TrimSpace(houseNumber + " " + road)},
+		{"Neighbourhood", neighbourhood},
+		{"City", city},
+		{"Province", province},
+		{"State", state},
+		{"Postal code", postcode},
+		{"Country", country},
+		{"Country code", strings.ToUpper(countryCode)},
+	}
+	for _, detail := range details {
+		if detail.label == "Street" && road == "" {
+			continue
+		}
+		if detail.value != "" {
+			out = append(out, "**"+detail.label+":** "+detail.value)
+		}
+	}
+
+	mapURL := "https://www.openstreetmap.org/?mlat=" + lt + "&mlon=" + ln + "&zoom=17"
+	out = append(out, "")
+	out = append(out, "[Open in map]("+mapURL+")")
+
+	out = append(out, "")
+	out = append(out, "![map]("+tileURL(latitude, longitude)+")")
+
+	return strings.Join(out, "\n")
+}
+
+// tileURL returns the zoom 15 OpenStreetMap tile that contains the point,
+// using the standard Web Mercator tile formula.
+func tileURL(latitude, longitude float64) string {
+	const zoom = 15
+
+	tiles := math.Exp2(zoom)
+	radians := latitude * math.Pi / 180
+	xTile := int((longitude + 180.0) / 360.0 * tiles)
+	yTile := int((1.0 - math.Log(math.Tan(radians)+1.0/math.Cos(radians))/math.Pi) / 2.0 * tiles)
+
+	return fmt.Sprintf("https://tile.openstreetmap.org/%d/%d/%d.png", zoom, xTile, yTile)
 }
