@@ -766,6 +766,25 @@ func TestCommandUICleanups(t *testing.T) {
 	}
 }
 
+func TestCommandUIHistoryExpires(t *testing.T) {
+	// Command output can name hosts, ports and addresses, so the panel
+	// keeps it in localStorage for a day only, and pruning is one named
+	// function the reader can find.
+	for _, want := range []string{"HISTORY_TTL_MS", "24 * 60 * 60 * 1000", "function pruneHistory(entries, now)", "savedAt"} {
+		if !strings.Contains(commandUI, want) {
+			t.Errorf("commandUI has no %q", want)
+		}
+	}
+
+	// The password dialog tells the user how long the history stays and
+	// how to remove it now.
+	for _, want := range []string{"for 24 hours", "removes it now"} {
+		if !strings.Contains(commandUI, want) {
+			t.Errorf("the panel help does not say %q", want)
+		}
+	}
+}
+
 // ─── Administrators only ─────────────────────────────────────────────────────
 
 func TestNonAdminGetsDisabledPlugin(t *testing.T) {

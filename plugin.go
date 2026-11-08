@@ -2203,6 +2203,8 @@ footer.gc-footer {
       <p>To use your own, set <code>web_password</code> in the plugin configuration. Empty it
         again to go back to the generated one.</p>
       <p>This tab keeps the password until you close it.</p>
+      <p>Command history is kept in this browser for 24 hours. The <strong>&#x2715; Clear</strong>
+        button in the History section removes it now.</p>
     </div>
   </article>
 </dialog>
@@ -2233,6 +2235,9 @@ var runningElements = [];
 var HISTORY_KEY = "gc_history";
 var THEME_KEY = "gc_theme";
 var MAX_HISTORY = 20;
+/* How long a history entry stays in localStorage. Command output can name
+   hosts, ports and addresses, so it is kept for a day, not for good. */
+var HISTORY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /* ── Theme System (Pico data-theme) ──────────────────── */
 var THEMES = ["dark", "light", "system"];
@@ -2438,15 +2443,58 @@ function enrichWithFavicons(text) {
 
 
 /* ── History Persistence ─────────────────────────────── */
+
+/**
+ * Reads the saved history and drops the entries older than HISTORY_TTL_MS.
+ * When some expired, the pruned list is written back, so their output does
+ * not stay in localStorage until the next command.
+ * @returns {Array<Object>} the entries still inside the TTL, newest first
+ */
 function loadHistory() {
+  var entries = [];
   try {
     var raw = localStorage.getItem(HISTORY_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) entries = JSON.parse(raw);
   } catch(e) {}
-  return [];
+
+  var fresh = pruneHistory(entries, Date.now());
+  if (fresh.length !== entries.length) saveHistory(fresh);
+
+  return fresh;
 }
 
+/**
+ * Keeps the entries saved less than HISTORY_TTL_MS before now. An entry
+ * without savedAt was stored by a version that did not record it; its age
+ * is unknown, so it is dropped too.
+ * @param {Array<Object>} entries - history entries as stored
+ * @param {number} now - the current time in epoch milliseconds
+ * @returns {Array<Object>} the entries still inside the TTL, in order
+ */
+function pruneHistory(entries, now) {
+  var fresh = [];
+  for (var i = 0; i < entries.length; i++) {
+    var savedAt = entries[i] ? entries[i].savedAt : undefined;
+    if (typeof savedAt === "number" && now - savedAt < HISTORY_TTL_MS) {
+      fresh.push(entries[i]);
+    }
+  }
+
+  return fresh;
+}
+
+/**
+ * Stores the newest MAX_HISTORY entries. An entry saved for the first time
+ * gets savedAt, the epoch milliseconds its TTL counts from; the ones already
+ * stored keep theirs, so saving again does not make old output young.
+ * @param {Array<Object>} entries - history entries, newest first
+ */
 function saveHistory(entries) {
+  var now = Date.now();
+  for (var i = 0; i < entries.length; i++) {
+    if (typeof entries[i].savedAt !== "number") entries[i].savedAt = now;
+  }
+
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
   } catch(e) {}
