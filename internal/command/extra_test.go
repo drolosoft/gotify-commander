@@ -108,7 +108,7 @@ func TestParseOperationsVerbs(t *testing.T) {
 	}
 
 	for _, testCase := range cases {
-		cmd, err := Parse(testCase.input, testAliases, testServices)
+		cmd, err := Parse(testCase.input, testAliases, testServices, "")
 		if err != nil {
 			t.Errorf("Parse(%q) error = %v", testCase.input, err)
 			continue

@@ -16,11 +16,14 @@ func (clock *testClock) read() time.Time {
 	return clock.now
 }
 
-// newTestConfirmations returns an empty store on a clock that starts at a
-// fixed time.
+// testWindow is the life of a code in these tests, the default one.
+const testWindow = 60 * time.Second
+
+// newTestConfirmations returns an empty store with the default window, on
+// a clock that starts at a fixed time.
 func newTestConfirmations() (*Confirmations, *testClock) {
 	clock := &testClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
-	return NewConfirmations(clock.read), clock
+	return NewConfirmations(testWindow, clock.read), clock
 }
 
 // rebootVPS is the dangerous command most tests ask to confirm.
@@ -62,9 +65,9 @@ func TestTakeWorksUntilTheWindowEnds(t *testing.T) {
 	confirmations, clock := newTestConfirmations()
 	code, _ := confirmations.Request(rebootVPS)
 
-	clock.now = clock.now.Add(ConfirmationWindow)
+	clock.now = clock.now.Add(testWindow)
 	if _, ok := confirmations.Take(code); !ok {
-		t.Errorf("code refused exactly %s after the request, want it still valid", ConfirmationWindow)
+		t.Errorf("code refused exactly %s after the request, want it still valid", testWindow)
 	}
 }
 
@@ -143,4 +146,21 @@ func wrongCode(code string) string {
 		return "1001"
 	}
 	return "1000"
+}
+
+func TestTakeUsesTheConfiguredWindow(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
+	confirmations := NewConfirmations(10*time.Second, clock.read)
+
+	code, _ := confirmations.Request(rebootVPS)
+	clock.now = clock.now.Add(10 * time.Second)
+	if _, ok := confirmations.Take(code); !ok {
+		t.Fatal("code refused at 10 s with window: 10s")
+	}
+
+	code, _ = confirmations.Request(rebootVPS)
+	clock.now = clock.now.Add(11 * time.Second)
+	if _, ok := confirmations.Take(code); ok {
+		t.Error("code accepted at 11 s with window: 10s")
+	}
 }

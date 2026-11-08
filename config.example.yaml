@@ -25,10 +25,20 @@ web_password: ""
 # empty to allow all of them.
 # enabled_commands: [ping, status, restart, logs, health]
 
-# Commands that ask for a code before running when they arrive as a message:
-# the plugin answers "reply `confirm 4821` within 60 s". Leave the key out for
-# the default list; an explicit empty list [] turns confirmation off.
-require_confirm: [reboot, shutdown, stop]
+# Optional: commands that ask for a code before running when they arrive as a
+# message. The plugin answers "reply `confirm 4821` within 60 s" and only that
+# reply runs the command. Left out or empty, nothing asks (the panel always
+# asks in the browser).
+# require_confirm: [reboot, shutdown, stop]
+
+# Wording and timing of that confirmation; every line may be left out.
+# keyword is the reply word: one lowercase word, not a command or service name.
+# prompt must contain {code}; {command}, {keyword} and {seconds} are filled in.
+# window needs a unit, like timeout.
+# confirmation:
+#   keyword: confirm
+#   prompt: "⚠️ Confirm `{command}`: reply `{keyword} {code}` within {seconds} s"
+#   window: 60s
 
 defaults:
   # How long a command may run before it is stopped.

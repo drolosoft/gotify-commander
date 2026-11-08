@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,10 +52,16 @@ type Commander struct {
 
 	// enabled is the set of enabled_commands, nil when every command is
 	// enabled. confirm is the set of require_confirm, and confirmations
-	// holds the one message command waiting for its code.
+	// holds the one message command waiting for its code. keyword is the
+	// reply word, empty while confirm is, so that with confirmation off no
+	// word is taken from the commands; prompt and window are the wording
+	// and the life of a code.
 	enabled       map[command.Action]bool
 	confirm       map[command.Action]bool
 	confirmations *command.Confirmations
+	keyword       string
+	prompt        string
+	window        time.Duration
 
 	mu           sync.RWMutex
 	commandCount int
@@ -92,8 +99,14 @@ func New(cfg *config.Config, exec executor.Executor, sender Sender) *Commander {
 		dangerSlot:     &sync.Mutex{},
 
 		enabled:       enabledActions(cfg),
-		confirm:       actionSet(cfg.ConfirmCommands()),
-		confirmations: command.NewConfirmations(time.Now),
+		confirm:       actionSet(cfg.RequireConfirm),
+		confirmations: command.NewConfirmations(cfg.Confirmation.WindowOrDefault(), time.Now),
+		prompt:        cfg.Confirmation.PromptOrDefault(),
+		window:        cfg.Confirmation.WindowOrDefault(),
+	}
+
+	if len(cfg.RequireConfirm) > 0 {
+		c.keyword = cfg.Confirmation.KeywordOrDefault()
 	}
 
 	// Auto-wire SSH executor for Mac Mini if the target is configured.
@@ -192,7 +205,7 @@ func (c *Commander) HandleCommand(input string) {
 // limited (defaults.rate_limit_per_minute, 20 by default): one over the
 // limit is answered with how long to wait and is not run. A command listed
 // in require_confirm is not run either: the reply carries a code, and the
-// message "confirm <code>" runs it (see runMessage). A command whose
+// message "<keyword> <code>" runs it (see runMessage). A command whose
 // context is already cancelled (the plugin is being disabled) is dropped
 // without a reply. A panic in a command is recovered, logged with its stack
 // and answered with an internal error.
@@ -280,7 +293,9 @@ func (c *Commander) Execute(input string) (resp command.Response) {
 // show the user. The panel asks for confirmation in the browser, so this
 // path does not go through require_confirm; messages take runMessage.
 func (c *Commander) run(ctx context.Context, input string) (resp command.Response, executed bool) {
-	cmd, err := command.Parse(input, c.aliases, c.services)
+	// No keyword: the panel has nothing pending, so a confirmation reply
+	// is just an unknown command there.
+	cmd, err := command.Parse(input, c.aliases, c.services, "")
 	if err != nil {
 		return parseRejection(err), false
 	}
@@ -289,12 +304,12 @@ func (c *Commander) run(ctx context.Context, input string) (resp command.Respons
 }
 
 // runMessage is run for a command that arrived as a Gotify message. A
-// "confirm <code>" runs the command waiting for that code. A command in
+// "<keyword> <code>" runs the command waiting for that code. A command in
 // require_confirm that would pass every check is stored with a new code and
 // answered with it instead of running; the checks come first so the user is
 // not asked to confirm something that would then be refused.
 func (c *Commander) runMessage(ctx context.Context, input string) (resp command.Response, executed bool) {
-	cmd, err := command.Parse(input, c.aliases, c.services)
+	cmd, err := command.Parse(input, c.aliases, c.services, c.keyword)
 	if err != nil {
 		return parseRejection(err), false
 	}
@@ -339,15 +354,20 @@ func (c *Commander) needsConfirmation(cmd command.Command) bool {
 }
 
 // requestConfirmation stores cmd as the pending command and builds the
-// reply with its code. When it replaces a pending command, the reply says
-// so, because that command's code stops working.
+// reply with its code from confirmation.prompt. When it replaces a pending
+// command, the reply says so, because that command's code stops working.
 func (c *Commander) requestConfirmation(cmd command.Command) command.Response {
 	code, replaced := c.confirmations.Request(cmd)
 
 	log.Printf("[commander] confirmation requested action=%s target=%q", cmd.Action, cmd.Target)
 
-	seconds := int(command.ConfirmationWindow.Seconds())
-	message := fmt.Sprintf("⚠️ Confirm `%s`: reply `confirm %s` within %d s", describe(cmd), code, seconds)
+	placeholders := strings.NewReplacer(
+		"{command}", describe(cmd),
+		"{keyword}", c.keyword,
+		"{code}", code,
+		"{seconds}", strconv.Itoa(int(c.window.Seconds())),
+	)
+	message := placeholders.Replace(c.prompt)
 	if replaced != nil {
 		message += fmt.Sprintf("\n\nThis replaces `%s`, whose code no longer works.", describe(*replaced))
 	}
@@ -364,12 +384,6 @@ func (c *Commander) requestConfirmation(cmd command.Command) command.Response {
 // service whitelist, the input filter and a registered handler. ok is false
 // when cmd is refused, and refusal is then the reply.
 func (c *Commander) check(cmd command.Command) (handler command.Handler, refusal command.Response, ok bool) {
-	// confirm only means something to runMessage; one that reaches this
-	// point came from the panel, which has nothing pending.
-	if cmd.Action == command.ActionConfirm {
-		return nil, rejection(noPendingTitle, noPendingMessage, noPendingPriority), false
-	}
-
 	// A disabled command is refused before anything else looks at it, so
 	// the reply does not depend on its target.
 	if c.enabled != nil && !c.enabled[cmd.Action] {

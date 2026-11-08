@@ -28,16 +28,20 @@ All notable changes to gotify-commander. The format follows
   configuration is saved. Changing it reconnects the stream listener.
 - A command older than the replay window is not run. The reply is
   "⌛ Command expired, not executed: <command>", with only the command word.
-- Confirmation for dangerous commands sent as Gotify messages. `reboot`,
-  `shutdown` and `stop` no longer run on the first message: the reply is
-  "⚠️ Confirm `reboot vps`: reply `confirm 4821` within 60 s", and only
-  `confirm <code>` runs it. The code is random, works once and for 60 s, and
-  only one command waits at a time; a new one replaces it and says so. A
+- Optional confirmation for commands sent as Gotify messages, off by
+  default. List the commands in the new `require_confirm` setting, for
+  example `[reboot, shutdown, stop]`, and the first message no longer runs
+  them: the reply is "⚠️ Confirm `reboot vps`: reply `confirm 4821` within
+  60 s", and only `confirm <code>` runs it. The code is random, works once,
+  and only one command waits at a time; a new one replaces it and says so. A
   wrong or expired code gets "❌ No pending command for that code". The
   panel keeps asking in the browser.
-- New setting `require_confirm`: the commands that need that confirmation.
-  Left out, it is `[reboot, shutdown, stop]`; `require_confirm: []` turns the
-  confirmation off.
+- New `confirmation:` section for that reply: `keyword` (the reply word,
+  `confirm` by default), `prompt` (the request text, with `{command}`,
+  `{keyword}`, `{code}` and `{seconds}`) and `window` (how long a code works,
+  60s by default). A keyword that is not one lowercase word or that is also a
+  command or service name, a prompt without `{code}` and a window under 1s
+  are refused when the configuration is saved.
 - New setting `enabled_commands`: the only commands that run, from messages
   and from the panel. Left out or empty, all of them run. Any other command
   gets "🚫 Command disabled by configuration" and is not counted. Unknown

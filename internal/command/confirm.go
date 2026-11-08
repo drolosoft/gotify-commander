@@ -8,12 +8,7 @@ import (
 	"time"
 )
 
-// ConfirmationWindow is how long the code of a confirmation request works.
-// A minute is enough to read the reply on a phone and type four digits; a
-// code found later in the message history no longer runs anything.
-const ConfirmationWindow = 60 * time.Second
-
-// Confirmations holds the one command that waits for "confirm <code>". A
+// Confirmations holds the one command that waits for "<keyword> <code>". A
 // dangerous command sent as a message is not run at once: it is stored here
 // with a random code, and only a reply with that code runs it. The store
 // lives in memory, so a restart of the plugin forgets the pending command.
@@ -21,6 +16,9 @@ const ConfirmationWindow = 60 * time.Second
 type Confirmations struct {
 	mu      sync.Mutex
 	pending *pendingConfirmation
+
+	// window is how long a code works after its request.
+	window time.Duration
 
 	// now is the clock the expiry is measured on, replaceable so tests
 	// can move it instead of waiting a minute.
@@ -34,9 +32,10 @@ type pendingConfirmation struct {
 	expires time.Time
 }
 
-// NewConfirmations returns an empty store that reads the time from now.
-func NewConfirmations(now func() time.Time) *Confirmations {
-	return &Confirmations{now: now}
+// NewConfirmations returns an empty store whose codes work for window and
+// that reads the time from now.
+func NewConfirmations(window time.Duration, now func() time.Time) *Confirmations {
+	return &Confirmations{window: window, now: now}
 }
 
 // Request stores command as the pending one and returns its new code. Only
@@ -66,7 +65,7 @@ func (c *Confirmations) Request(command Command) (code string, replaced *Command
 	c.pending = &pendingConfirmation{
 		command: command,
 		code:    code,
-		expires: now.Add(ConfirmationWindow),
+		expires: now.Add(c.window),
 	}
 
 	return code, replaced

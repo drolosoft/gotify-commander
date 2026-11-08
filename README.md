@@ -336,6 +336,16 @@ Without a matching entry, commands to that machine fail with a host key error. T
 - Only Gotify administrators get a working plugin instance. For other users the plugin page shows a notice and nothing is started.
 - `locate` sends the coordinates you type to the OpenStreetMap Nominatim service to get an address. The coordinates are not written to the plugin log, but they do leave your server.
 
+### Confirmation by message (optional)
+
+Commands sent as Gotify messages run at once by default. To have some of them ask first, list them in `require_confirm`:
+
+```yaml
+require_confirm: [reboot, shutdown, stop]
+```
+
+A `reboot vps` message then gets the reply "⚠️ Confirm `reboot vps`: reply `confirm 4821` within 60 s", and the reboot runs only when `confirm 4821` arrives in time. The code is random and works once. Only one command waits at a time: a new one replaces it and the reply says so. The `confirmation:` section changes the reply word (`keyword`), the text (`prompt`) and the time a code works (`window`); see `config.example.yaml`. This guards against a command sent by mistake, not against someone who holds a client token, because that person can read the reply too. The control panel asks in the browser either way.
+
 ### Hardening Recommendations
 
 1. **Run Gotify behind a VPN** (Tailscale, WireGuard). Do not expose Gotify to the public internet. This is the single most important security measure.
