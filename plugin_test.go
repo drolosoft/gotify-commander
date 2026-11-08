@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	plugin "github.com/gotify/plugin-api"
 
+	"github.com/drolosoft/gotify-commander/internal/command"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
@@ -1046,5 +1047,16 @@ func TestConfigWithUnknownCommandIsRefused(t *testing.T) {
 	}
 	if instance.cfg != nil {
 		t.Errorf("a refused configuration was applied")
+	}
+}
+
+// ─── Version ─────────────────────────────────────────────────────────────────
+
+func TestVersionComesFromBuild(t *testing.T) {
+	if got := GetGotifyPluginInfo().Version; got != version {
+		t.Errorf("plugin info version = %q, want %q", got, version)
+	}
+	if command.Version != version {
+		t.Errorf("command.Version = %q, want %q (User-Agent of locate)", command.Version, version)
 	}
 }

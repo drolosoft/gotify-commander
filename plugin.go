@@ -23,17 +23,28 @@ import (
 	"github.com/gin-gonic/gin"
 	plugin "github.com/gotify/plugin-api"
 
+	"github.com/drolosoft/gotify-commander/internal/command"
 	"github.com/drolosoft/gotify-commander/internal/commander"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/executor"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
 
+// version is the plugin version. The Makefile sets it from git describe with
+// -ldflags "-X main.version=..."; a build without the flag says "dev".
+var version = "dev"
+
+// init hands the version to the command package, which sends it in the
+// User-Agent of locate and cannot import main to read it.
+func init() {
+	command.Version = version
+}
+
 // GetGotifyPluginInfo returns plugin metadata used by the Gotify server for identification.
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		ModulePath:  "github.com/drolosoft/gotify-commander",
-		Version:     "0.2.0",
+		Version:     version,
 		Author:      "Drolosoft",
 		Name:        "Gotify Commander",
 		Website:     "https://drolosoft.com",
