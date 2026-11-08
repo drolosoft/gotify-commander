@@ -286,6 +286,21 @@ ssh_targets:
 
 Once configured, `free mac`, `df mac`, `uptime mac`, and services with `machine: mac` all route through SSH automatically.
 
+macOS has no `free`, `ss`, `apt` or `journalctl`, so set `os: darwin` on a Mac target (the default is `linux`). The commands then run what a Mac has, with no shell in between, and the counting is done in Go:
+
+| Command | On a Mac (`os: darwin`) |
+|---------|-------------------------|
+| `free mac` | `vm_stat`, shown as free, active, inactive and wired MiB |
+| `top mac` | `ps -r -A -o pid,pcpu,pmem,comm`, first 10 lines |
+| `ip mac` | `ipconfig getifaddr en0`, or the `ifconfig` addresses when en0 has none |
+| `ports mac` | `lsof -iTCP -sTCP:LISTEN -P -n` |
+| `connections mac` | `netstat -an -p tcp`, counted as established and listening |
+| `restart` / `stop` / `start` | `launchctl kickstart -k` / `bootout` / `enable` + `kickstart -k` on `gui/<uid>/<label>` |
+| `status` | the HTTP check on `port`, or `launchctl print gui/<uid>/<label>` without one |
+| `logs` | `/usr/bin/log show --last 10m` for the process named by the last part of the label |
+
+The service commands use launchctl on any `machine: mac` service, whatever `os` says, and the `<uid>` comes from one `id -u` on the first of them. A LaunchAgent stopped with `stop` is unloaded: `start` reports launchctl's error until you load it again on the Mac with `launchctl bootstrap gui/$(id -u) <plist>`. `updates` has no machine argument and always runs `apt` on the VPS.
+
 The plugin verifies the remote host key against `known_hosts`. By default it reads `~/.ssh/known_hosts` of the user that runs Gotify; when Gotify runs as a service or in Docker that file often does not exist, so set `known_hosts_file` or add the key first:
 
 ```bash

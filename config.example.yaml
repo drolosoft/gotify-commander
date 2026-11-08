@@ -64,6 +64,8 @@ ssh_targets:
     # first command. Add it as the user that runs Gotify:
     #   ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts
     # (or >> the known_hosts_file above), then check the fingerprint.
+    # Operating system of the machine: linux (the default) or darwin for a Mac.
+    os: darwin
 
 # Containers the "docker ps|restart|logs <name>" command may touch. Names are
 # matched without case; any other container is refused, and an empty list

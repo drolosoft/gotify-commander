@@ -42,6 +42,12 @@ All notable changes to gotify-commander. The format follows
   and from the panel. Left out or empty, all of them run. Any other command
   gets "🚫 Command disabled by configuration" and is not counted. Unknown
   names in either list are refused when the configuration is saved.
+- New setting `ssh_targets.<name>.os`: `linux` (the default) or `darwin`.
+  With `os: darwin`, `free`, `top`, `ip`, `ports` and `connections` run
+  macOS commands on that machine. Any other value is refused when the
+  configuration is saved.
+- `logs` works for Mac services: the last `log_lines` lines of the macOS
+  unified log of the service's process, from the last 10 minutes.
 
 ### Changed
 
@@ -58,6 +64,24 @@ All notable changes to gotify-commander. The format follows
 
 ### Fixed
 
+- The `mac` target ran Linux commands that macOS does not have: `free -h`,
+  `ps --sort`, `hostname -I` and `ss`. With `os: darwin` it runs `vm_stat`
+  (shown as free, active, inactive and wired MiB), `ps -r`, `ipconfig
+  getifaddr en0` (or the `ifconfig` addresses), `lsof` and `netstat`
+  (counted in Go). `updates` takes no machine argument and keeps running
+  `apt` on the VPS; the Mac's `softwareupdate -l` is ready for when it
+  does.
+- `restart`, `stop`, `start` and `status` of Mac services did not agree:
+  `launchctl load` and `unload` need the path of a plist, while `status`
+  looked for the label. All of them now use the label from `launchd` in the
+  user's GUI domain: `restart` is `launchctl kickstart -k`, `stop` is
+  `launchctl bootout`, `start` is `launchctl enable` plus `kickstart -k`,
+  and `status` of a service without a port reads `launchctl print`
+  (`running (pid N)`, `not running` or `not loaded`). This does not depend
+  on `os`, since launchd only exists on macOS. After a `stop` the service is
+  unloaded, and `start` answers with launchctl's "Could not find service"
+  error until it is loaded again on the Mac (`launchctl bootstrap gui/<uid>
+  <plist>`).
 - A command posted while the plugin was not connected to the Gotify stream
   (a Gotify restart, a dropped connection) was never run: Gotify does not
   push stored messages to a client that connects later. On every connection
