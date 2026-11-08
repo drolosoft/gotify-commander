@@ -5,6 +5,17 @@ All notable changes to gotify-commander. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- New setting `defaults.rate_limit_per_minute` for the commands sent as Gotify
+  messages. Empty or 0 means 10; a negative value is refused when the
+  configuration is saved.
+- The rate limiter moved to the `internal/ratelimit` package. The panel and
+  the message path each have their own limiter, so they keep separate
+  budgets.
+- History entries saved by an earlier version have no timestamp. The panel
+  drops them the first time it loads.
+
 ### Fixed
 
 - Saving the configuration in the Gotify UI no longer resets the command
@@ -12,6 +23,19 @@ All notable changes to gotify-commander. The format follows
   `/health`. The stream listener keeps its connection when `server_url`,
   `client_token` and `command_app_id` did not change; it reconnects only when
   one of them did.
+
+### Security
+
+- Commands sent as Gotify messages are rate limited: 10 per minute per plugin
+  instance by default. Before, any client token of the user could queue 16
+  `reboot`s. A command over the limit is not run and gets "⏳ Too many
+  commands, try again in N s". The panel keeps its own 10 per minute.
+- `reboot`, `shutdown` and every command in a `danger: true` category run one
+  at a time, from messages and from the panel. A second one sent while the
+  first is still running is refused with "⚠️ Another dangerous command is
+  still running". Other commands keep running.
+- The panel's command history in `localStorage` expires after 24 hours. The
+  password dialog says so and points to the Clear button.
 
 ## [0.3.0] - 2026-11-08
 

@@ -198,6 +198,21 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "rate_limit_per_minute 0 passes, it means the default",
+			mutate:  func(c *Config) { c.Defaults.RateLimitPerMinute = 0 },
+			wantErr: false,
+		},
+		{
+			name:    "positive rate_limit_per_minute passes",
+			mutate:  func(c *Config) { c.Defaults.RateLimitPerMinute = 3 },
+			wantErr: false,
+		},
+		{
+			name:    "negative rate_limit_per_minute fails",
+			mutate:  func(c *Config) { c.Defaults.RateLimitPerMinute = -1 },
+			wantErr: true,
+		},
+		{
 			name: "invalid machine fails",
 			mutate: func(c *Config) {
 				c.Services["nginx"] = Service{Machine: "windows", Systemd: "nginx.service"}
@@ -232,6 +247,35 @@ func TestValidateConfig(t *testing.T) {
 				t.Errorf("expected no error but got: %v", err)
 			}
 		})
+	}
+}
+
+func TestCommandsPerMinute(t *testing.T) {
+	tests := []struct {
+		name  string
+		yaml  string
+		limit int
+	}{
+		{name: "missing means the default", yaml: "defaults:\n  timeout: 10s\n", limit: DefaultRateLimitPerMinute},
+		{name: "zero means the default", yaml: "defaults:\n  rate_limit_per_minute: 0\n", limit: DefaultRateLimitPerMinute},
+		{name: "a value is used as is", yaml: "defaults:\n  rate_limit_per_minute: 4\n", limit: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseYAML([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("ParseYAML: %v", err)
+			}
+
+			if got := cfg.Defaults.CommandsPerMinute(); got != tt.limit {
+				t.Errorf("CommandsPerMinute() = %d, want %d", got, tt.limit)
+			}
+		})
+	}
+
+	if DefaultRateLimitPerMinute != 10 {
+		t.Errorf("DefaultRateLimitPerMinute = %d, want 10", DefaultRateLimitPerMinute)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/drolosoft/gotify-commander/internal/command"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/executor"
+	"github.com/drolosoft/gotify-commander/internal/ratelimit"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
 
@@ -450,4 +451,212 @@ type writerFunc func(p []byte) (int, error)
 // Write calls the function.
 func (write writerFunc) Write(p []byte) (int, error) {
 	return write(p)
+}
+
+// ─── rate limit and dangerous commands ───────────────────────────────────────
+
+// gatedExecutor records every program it is asked to run. A run whose first
+// argument is blocked (the "reboot" of "sudo reboot") reports on started and
+// waits for release, so a test can keep that command in flight.
+type gatedExecutor struct {
+	blocked string
+	started chan struct{}
+	release chan struct{}
+
+	mu   sync.Mutex
+	runs []string
+}
+
+// newGatedExecutor returns an executor that holds every run of blocked
+// until release is closed.
+func newGatedExecutor(blocked string) *gatedExecutor {
+	return &gatedExecutor{
+		blocked: blocked,
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+}
+
+// Run records the program and, for the blocked one, waits for release or
+// for the command's timeout, so a regression fails instead of hanging.
+func (e *gatedExecutor) Run(ctx context.Context, name string, args ...string) (executor.Result, error) {
+	e.mu.Lock()
+	e.runs = append(e.runs, strings.Join(append([]string{name}, args...), " "))
+	e.mu.Unlock()
+
+	if e.blocked != "" && len(args) > 0 && args[0] == e.blocked {
+		// Only the first blocked run needs to be announced; the buffer
+		// keeps a later one from waiting for a reader that is gone.
+		select {
+		case e.started <- struct{}{}:
+		default:
+		}
+
+		select {
+		case <-e.release:
+		case <-ctx.Done():
+		}
+	}
+
+	return executor.Result{Output: "ok"}, nil
+}
+
+// count returns how many recorded runs start with program.
+func (e *gatedExecutor) count(program string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	total := 0
+	for _, run := range e.runs {
+		if strings.HasPrefix(run, program) {
+			total++
+		}
+	}
+	return total
+}
+
+func TestHandleRateLimitsMessages(t *testing.T) {
+	exec := newGatedExecutor("")
+	sender := &mockSender{}
+	cmdr := New(testConfig(), exec, sender)
+
+	// The clock moves 5 s per command, so all eleven fall inside one minute
+	// and the eleventh arrives 50 s after the first.
+	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	cmdr.messageLimiter = ratelimit.NewWithClock(config.DefaultRateLimitPerMinute, time.Minute, func() time.Time { return now })
+
+	for attempt := 1; attempt <= config.DefaultRateLimitPerMinute; attempt++ {
+		cmdr.Handle(context.Background(), "uptime")
+		now = now.Add(5 * time.Second)
+	}
+	cmdr.Handle(context.Background(), "uptime")
+
+	if runs := exec.count("uptime"); runs != config.DefaultRateLimitPerMinute {
+		t.Errorf("executor ran uptime %d times, want %d", runs, config.DefaultRateLimitPerMinute)
+	}
+
+	messages := sender.snapshot()
+	if len(messages) != config.DefaultRateLimitPerMinute+1 {
+		t.Fatalf("got %d replies, want %d", len(messages), config.DefaultRateLimitPerMinute+1)
+	}
+
+	refused := messages[len(messages)-1]
+	if refused.title != "⏳ Rate limited" {
+		t.Errorf("title %q, want %q", refused.title, "⏳ Rate limited")
+	}
+	if refused.message != "⏳ Too many commands, try again in 10 s" {
+		t.Errorf("message %q, want the wait until the first command leaves the minute", refused.message)
+	}
+	if refused.priority != 5 {
+		t.Errorf("priority %d, want 5", refused.priority)
+	}
+	if count, _, _, _ := cmdr.Stats(); count != config.DefaultRateLimitPerMinute {
+		t.Errorf("stats count %d, want %d: a refused command does not count", count, config.DefaultRateLimitPerMinute)
+	}
+
+	// A minute after the first command, its slot is free again.
+	now = now.Add(10 * time.Second)
+	cmdr.Handle(context.Background(), "uptime")
+	if runs := exec.count("uptime"); runs != config.DefaultRateLimitPerMinute+1 {
+		t.Errorf("after the window moved: executor ran uptime %d times, want %d", runs, config.DefaultRateLimitPerMinute+1)
+	}
+}
+
+func TestHandleUsesTheConfiguredRateLimit(t *testing.T) {
+	cfg := testConfig()
+	cfg.Defaults.RateLimitPerMinute = 2
+	exec := newGatedExecutor("")
+	cmdr := New(cfg, exec, &mockSender{})
+
+	for range 3 {
+		cmdr.Handle(context.Background(), "uptime")
+	}
+
+	if runs := exec.count("uptime"); runs != 2 {
+		t.Errorf("executor ran uptime %d times, want 2 with rate_limit_per_minute: 2", runs)
+	}
+}
+
+func TestExecuteIsNotCountedByTheMessageLimit(t *testing.T) {
+	exec := newGatedExecutor("")
+	cmdr := New(testConfig(), exec, &mockSender{})
+
+	// The panel has its own limiter in front of Execute; the messages'
+	// budget must not take commands away from it, or the other way round.
+	for range config.DefaultRateLimitPerMinute + 1 {
+		cmdr.Execute("uptime")
+	}
+	cmdr.Handle(context.Background(), "uptime")
+
+	if runs := exec.count("uptime"); runs != config.DefaultRateLimitPerMinute+2 {
+		t.Errorf("executor ran uptime %d times, want %d", runs, config.DefaultRateLimitPerMinute+2)
+	}
+}
+
+func TestDangerousCommandsRunOneAtATime(t *testing.T) {
+	cfg := testConfig()
+	cfg.Categories = []config.Category{
+		{Label: "Careful", Type: "service", Commands: []string{"restart"}, Danger: true},
+	}
+	exec := newGatedExecutor("reboot")
+	sender := &mockSender{}
+	cmdr := New(cfg, exec, sender)
+
+	// A reboot that is still waiting for the host holds the danger slot.
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		cmdr.Handle(context.Background(), "reboot vps")
+	}()
+	<-exec.started
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	cmdr.Handle(context.Background(), "shutdown vps")
+	cmdr.Handle(context.Background(), "restart nginx")
+	panelReply := cmdr.Execute("reboot vps")
+	cmdr.Handle(context.Background(), "ping")
+
+	messages := sender.snapshot()
+	if len(messages) != 4 {
+		t.Fatalf("got %d replies while the reboot runs, want 4: %+v", len(messages), messages)
+	}
+	for index, refused := range messages[:3] {
+		if refused.message != "⚠️ Another dangerous command is still running" {
+			t.Errorf("reply %d: message %q, want the danger refusal", index+1, refused.message)
+		}
+	}
+	if panelReply.Message != "⚠️ Another dangerous command is still running" {
+		t.Errorf("panel reply %q, want the danger refusal", panelReply.Message)
+	}
+	if messages[3].message != "pong" {
+		t.Errorf("ping during the reboot answered %q, want pong", messages[3].message)
+	}
+	if runs := exec.count("sudo"); runs != 1 {
+		t.Errorf("executor ran %d privileged commands, want only the first reboot", runs)
+	}
+
+	// Once the reboot returns, the next dangerous command may run.
+	close(exec.release)
+	<-finished
+
+	cmdr.Handle(context.Background(), "shutdown vps")
+	if runs := exec.count("sudo shutdown"); runs != 1 {
+		t.Errorf("shutdown after the reboot finished ran %d times, want 1", runs)
+	}
+}
+
+func TestPanicInDangerousCommandFreesTheSlot(t *testing.T) {
+	cmdr, sender := newTestCommander("")
+	panicOn(cmdr, command.ActionReboot)
+
+	cmdr.HandleCommand("reboot vps")
+	cmdr.HandleCommand("shutdown vps")
+
+	messages := sender.snapshot()
+	if len(messages) != 2 {
+		t.Fatalf("got %d replies, want 2: %+v", len(messages), messages)
+	}
+	if strings.Contains(messages[1].message, "Another dangerous command") {
+		t.Errorf("shutdown after a panicked reboot was refused: %q", messages[1].message)
+	}
 }

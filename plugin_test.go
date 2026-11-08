@@ -626,37 +626,6 @@ func TestExecuteConcurrencyLimit(t *testing.T) {
 	}
 }
 
-func TestRateLimiterWindow(t *testing.T) {
-	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
-	limiter := newRateLimiter(2, time.Minute)
-	limiter.now = func() time.Time { return now }
-
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Fatal("first call refused")
-	}
-	now = now.Add(20 * time.Second)
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Fatal("second call refused")
-	}
-
-	allowed, retryAfter := limiter.Allow()
-	if allowed {
-		t.Fatal("third call within the minute allowed")
-	}
-	if retryAfter != 40*time.Second {
-		t.Errorf("retry after %s, want 40s (when the first call leaves the window)", retryAfter)
-	}
-
-	// Once the first call is a minute old, one more fits.
-	now = now.Add(40 * time.Second)
-	if allowed, _ := limiter.Allow(); !allowed {
-		t.Error("call refused after the oldest one left the window")
-	}
-	if allowed, _ := limiter.Allow(); allowed {
-		t.Error("window holds more calls than the limit")
-	}
-}
-
 // ─── Security headers and CSP ────────────────────────────────────────────────
 
 // noncePattern extracts the nonce from the Content-Security-Policy header.
@@ -794,6 +763,25 @@ func TestCommandUICleanups(t *testing.T) {
 	}
 	if !strings.Contains(commandUI, "<dialog") {
 		t.Errorf("commandUI has no password dialog")
+	}
+}
+
+func TestCommandUIHistoryExpires(t *testing.T) {
+	// Command output can name hosts, ports and addresses, so the panel
+	// keeps it in localStorage for a day only, and pruning is one named
+	// function the reader can find.
+	for _, want := range []string{"HISTORY_TTL_MS", "24 * 60 * 60 * 1000", "function pruneHistory(entries, now)", "savedAt"} {
+		if !strings.Contains(commandUI, want) {
+			t.Errorf("commandUI has no %q", want)
+		}
+	}
+
+	// The password dialog tells the user how long the history stays and
+	// how to remove it now.
+	for _, want := range []string{"for 24 hours", "removes it now"} {
+		if !strings.Contains(commandUI, want) {
+			t.Errorf("the panel help does not say %q", want)
+		}
 	}
 }
 
