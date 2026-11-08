@@ -15,7 +15,7 @@ You're at a cafe. Your phone buzzes -- a service is down. You tap `restart nginx
 
 No laptop. No SSH. No terminal. Just your phone and the Gotify app you already use.
 
-23 commands. A visual control panel. Multi-machine support. One YAML config. Every other Gotify plugin forwards notifications somewhere else. This one lets you act on them.
+27 commands. A visual control panel. Multi-machine support. One YAML config. Every other Gotify plugin forwards notifications somewhere else. This one lets you act on them.
 
 ---
 
@@ -153,6 +153,15 @@ The same setup is what `test/e2e/smoke.sh` uses to check each release against Go
 | Command | Args | Description |
 |---------|------|-------------|
 | `locate` | `<lat> <lon>` | GPS reverse geocoding via OpenStreetMap |
+
+### 🧰 Operations (4)
+
+| Command | Args | Description |
+|---------|------|-------------|
+| `failed` | `[vps/mac]` | Failed systemd units; on a macOS target it says it is not available |
+| `health` | -- | One summary: mounts at 85 % or more, load, memory, failed units, certificates expiring within 14 days |
+| `docker` | `ps [name]` / `restart <name>` / `logs <name>` | Containers listed in `docker.allowed_containers` only; `restart` counts as dangerous |
+| `digest` | -- | The health summary now; with `digest.enabled` it also arrives every day at `digest.at` |
 
 ### ⚠️ Danger (2)
 
@@ -299,9 +308,10 @@ Without a matching entry, commands to that machine fail with a host key error. T
 
 ### What Can Be Executed
 
-- Only the **23 registered commands** can run. No arbitrary command execution.
+- Only the **27 registered commands** can run. No arbitrary command execution.
 - Service names are validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` and must match your configured whitelist.
-- Commands run through `exec.Command` without a shell. The one exception is a fixed script in `traffic` that filters the nginx logs; the domain and the temp file path reach it as positional arguments, never as part of the script text.
+- Commands run through `exec.Command` without a shell. The exceptions are two fixed scripts: one in `traffic` that filters the nginx logs, where the domain and the temp file path reach it as positional arguments, never as part of the script text, and `command -v docker`, which `docker` runs once to see whether docker is installed.
+- `docker` only acts on the containers listed in `docker.allowed_containers`. The container name in the command line is always the one from the configuration, never the text you typed.
 - Every command runs in its own process group with a timeout that kills the whole group, and its output is capped at 64 KiB.
 - SSH targets are verified against `known_hosts`. Remote commands are quoted word by word.
 - The plugin runs with the same permissions as the Gotify process plus the `sudo` rules you grant it. `config.example.yaml` ends with a minimal `sudoers` block listing the binaries the commands call.
@@ -323,7 +333,7 @@ Without a matching entry, commands to that machine fail with a host key error. T
 
 | Layer | Status |
 |-------|--------|
-| Command whitelist (23 commands) | ✅ Enforced |
+| Command whitelist (27 commands) | ✅ Enforced |
 | Input sanitization (regex) | ✅ Enforced |
 | Service name whitelist | ✅ Enforced |
 | Execution timeouts (30s default) | ✅ Enforced |
@@ -370,6 +380,8 @@ Some commands rely on utilities installed on the server. The plugin works withou
 | `certs` | `openssl` | Pre-installed on most distros | Reads Let's Encrypt certificates |
 | `ports` | `ss` | Part of `iproute2` | Socket statistics |
 | `top` | `ps` | Part of `procps` | Process listing |
+| `docker` | [Docker](https://docs.docker.com/engine/install/) | -- | The user that runs Gotify needs access to the Docker socket |
+| `health` | `df`, `free`, `systemctl`, `openssl` | Pre-installed on most distros | Reads `/proc/loadavg`; certificates as `certs` does |
 
 All other commands use standard Linux utilities (`systemctl`, `free`, `uptime`, `who`, `hostname`, `journalctl`, `zcat`, `grep`). `python3` is no longer needed.
 
