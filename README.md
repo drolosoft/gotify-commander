@@ -146,7 +146,7 @@ The same setup is what `test/e2e/smoke.sh` uses to check each release against Go
 | `traffic` | `[service]` | Nginx traffic analysis via rhit (last 3 months) |
 | `analytics` | -- | Web analytics summary via goaccess |
 | `certs` | -- | SSL certificate expiry for all domains |
-| `updates` | -- | Pending system updates (apt) |
+| `updates` | `[vps/mac]` | Pending system updates (apt, or softwareupdate on a Mac) |
 
 ### 📍 Location (1)
 
@@ -299,7 +299,7 @@ macOS has no `free`, `ss`, `apt` or `journalctl`, so set `os: darwin` on a Mac t
 | `status` | the HTTP check on `port`, or `launchctl print gui/<uid>/<label>` without one |
 | `logs` | `/usr/bin/log show --last 10m` for the process named by the last part of the label |
 
-The service commands use launchctl on any `machine: mac` service, whatever `os` says, and the `<uid>` comes from one `id -u` on the first of them. A LaunchAgent stopped with `stop` is unloaded: `start` reports launchctl's error until you load it again on the Mac with `launchctl bootstrap gui/$(id -u) <plist>`. `updates` has no machine argument and always runs `apt` on the VPS.
+The service commands use launchctl on any `machine: mac` service, whatever `os` says, and the `<uid>` comes from one `id -u` on the first of them. A LaunchAgent stopped with `stop` is unloaded: `start` reports launchctl's error until you load it again on the Mac with `launchctl bootstrap gui/$(id -u) <plist>`. `updates mac` runs `softwareupdate -l`.
 
 The plugin verifies the remote host key against `known_hosts`. By default it reads `~/.ssh/known_hosts` of the user that runs Gotify; when Gotify runs as a service or in Docker that file often does not exist, so set `known_hosts_file` or add the key first:
 

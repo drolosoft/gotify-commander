@@ -86,7 +86,6 @@ var noTargetCommands = map[Action]bool{
 	ActionStatus:    true,
 	ActionServices:  true,
 	ActionHelp:      true,
-	ActionUpdates:   true,
 	ActionCerts:     true,
 	ActionAnalytics: true,
 	ActionLocate:    true,

@@ -68,9 +68,8 @@ All notable changes to gotify-commander. The format follows
   `ps --sort`, `hostname -I` and `ss`. With `os: darwin` it runs `vm_stat`
   (shown as free, active, inactive and wired MiB), `ps -r`, `ipconfig
   getifaddr en0` (or the `ifconfig` addresses), `lsof` and `netstat`
-  (counted in Go). `updates` takes no machine argument and keeps running
-  `apt` on the VPS; the Mac's `softwareupdate -l` is ready for when it
-  does.
+  (counted in Go). `updates mac` runs `softwareupdate -l`; `updates` alone
+  keeps checking `apt` on the VPS.
 - `restart`, `stop`, `start` and `status` of Mac services did not agree:
   `launchctl load` and `unload` need the path of a plist, while `status`
   looked for the label. All of them now use the label from `launchd` in the

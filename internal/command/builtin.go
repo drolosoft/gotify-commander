@@ -241,12 +241,13 @@ func (b *Builtins) Help(cmd Command) Response {
 | ` + "`traffic [svc]`" + ` | 📈 Nginx traffic (rhit) |
 | ` + "`analytics`" + ` | 📊 Web analytics (goaccess) |
 | ` + "`certs`" + ` | 🔒 SSL cert expiry |
-| ` + "`updates`" + ` | 📦 Pending apt updates |
+| ` + "`updates [vps/mac]`" + ` | 📦 Pending updates |
 | ` + "`locate <lat> <lon>`" + ` | 📍 GPS reverse geocode |
 | ` + "`reboot vps/mac`" + ` | 🔁 Reboot a machine |
 | ` + "`shutdown vps/mac`" + ` | ⚠️ Shutdown a machine |
 | ` + "`services`" + ` | 📋 List all services |
 | ` + "`help`" + ` | ❓ This message |
+` + strings.Join(ExtraHelpLines(), "\n") + `
 
 ### ⚡ Quick Actions
 
@@ -376,7 +377,7 @@ func (b *Builtins) lookupService(target string) (string, config.Service, bool) {
 func (b *Builtins) serviceResponse(action, name, machine, portStr, emoji string, svc config.Service) Response {
 	return Response{
 		Title:    b.title(action) + " " + b.title(name),
-		Message:  fmt.Sprintf("%s %s %sed on %s%s", emoji, name, action, machine, portStr),
+		Message:  fmt.Sprintf("%s %s %s on %s%s", emoji, name, pastTense(action), machine, portStr),
 		Priority: 3,
 	}
 }
@@ -1376,4 +1377,14 @@ func tileURL(latitude, longitude float64) string {
 	yTile := int((1.0 - math.Log(math.Tan(radians)+1.0/math.Cos(radians))/math.Pi) / 2.0 * tiles)
 
 	return fmt.Sprintf("https://tile.openstreetmap.org/%d/%d/%d.png", zoom, xTile, yTile)
+}
+
+// pastTense turns a service action into the word the reply uses. "stop"
+// doubles its last letter, so a plain "ed" suffix would spell "stoped".
+func pastTense(action string) string {
+	if action == "stop" {
+		return "stopped"
+	}
+
+	return action + "ed"
 }
