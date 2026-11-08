@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/drolosoft/gotify-commander/internal/config"
@@ -48,6 +49,12 @@ type Builtins struct {
 	// URL at a local server.
 	httpClient   *http.Client
 	nominatimURL string
+
+	// launchdUIDs caches, per SSH target, the user ID "id -u" printed
+	// there. launchctl addresses a LaunchAgent as gui/<uid>/<label>, and
+	// the ID does not change while the plugin runs, so it is asked once.
+	launchdUIDsMu sync.Mutex
+	launchdUIDs   map[string]string
 }
 
 // NewBuiltins creates a Builtins instance with the given config and executor.
@@ -133,6 +140,59 @@ func (b *Builtins) execForTarget(target string) executor.Executor {
 		return b.sshExec
 	}
 	return b.exec
+}
+
+// commandsForTarget returns the command table of the machine execForTarget
+// picks for target: the os of the "mac" SSH target when the command goes
+// there, linux for the local machine.
+func (b *Builtins) commandsForTarget(target string) osCommands {
+	if strings.EqualFold(target, "mac") && b.sshExec != nil {
+		return commandsFor(b.cfg.SSHTargets["mac"].OS)
+	}
+	return linuxCommands
+}
+
+// runMachineCommand runs command with exec and returns the reply text. Only
+// a failure to run it is an error; a command that exits non-zero still
+// answers with what it printed, as the builtins always did.
+func runMachineCommand(ctx context.Context, exec executor.Executor, command machineCommand) (string, error) {
+	result, err := exec.Run(ctx, command.argv[0], command.argv[1:]...)
+	if err != nil {
+		return "", err
+	}
+	return command.text(result.Output), nil
+}
+
+// launchdUID returns the user ID of the SSH user on the "mac" target, which
+// launchctl needs in gui/<uid>/<label>. The first call asks the Mac with
+// "id -u"; later calls use the cached answer. A failed answer is not
+// cached, so the next command asks again.
+func (b *Builtins) launchdUID(ctx context.Context) (string, error) {
+	const target = "mac"
+
+	b.launchdUIDsMu.Lock()
+	defer b.launchdUIDsMu.Unlock()
+
+	if uid, found := b.launchdUIDs[target]; found {
+		return uid, nil
+	}
+
+	result, err := b.sshExec.Run(ctx, "id", "-u")
+	if err != nil {
+		return "", fmt.Errorf("id -u: %w", err)
+	}
+
+	// Anything but a number would end up inside the launchctl argument.
+	uid := strings.TrimSpace(result.Output)
+	if _, err := strconv.ParseUint(uid, 10, 32); result.ExitCode != 0 || err != nil {
+		return "", fmt.Errorf("id -u answered %q", uid)
+	}
+
+	if b.launchdUIDs == nil {
+		b.launchdUIDs = make(map[string]string)
+	}
+	b.launchdUIDs[target] = uid
+	return uid, nil
 }
 
 // title capitalises the first letter of s.
@@ -255,18 +315,15 @@ func (b *Builtins) serviceAction(action, name string, svc config.Service) Respon
 		if b.sshExec == nil {
 			return errorResponse("SSH Not Configured", "SSH executor not configured for Mac targets")
 		}
-		var cmds [][]string
-		switch action {
-		case "restart":
-			cmds = [][]string{
-				{"launchctl", "unload", svc.Launchd},
-				{"launchctl", "load", svc.Launchd},
-			}
-		case "stop":
-			cmds = [][]string{{"launchctl", "unload", svc.Launchd}}
-		case "start":
-			cmds = [][]string{{"launchctl", "load", svc.Launchd}}
+
+		// launchd exists only on macOS, so a Mac service always gets
+		// launchctl's commands, whatever os the target declares.
+		uid, err := b.launchdUID(ctx)
+		if err != nil {
+			return errorResponse(b.title(action)+" Failed", fmt.Sprintf("Failed to %s %s: %s", action, name, err.Error()))
 		}
+
+		cmds := launchdSteps(action, uid, svc.Launchd)
 		for _, c := range cmds {
 			result, err := b.sshExec.Run(ctx, c[0], c[1:]...)
 			if err != nil || result.ExitCode != 0 {
@@ -380,15 +437,7 @@ func (b *Builtins) statusSingle(name string, svc config.Service) string {
 			status = "HTTP " + code
 			ok = err == nil && code != "" && code != "000"
 		} else {
-			// No port — check if launchd service is loaded
-			result, _ := b.sshExec.Run(ctx, "launchctl", "list")
-			if strings.Contains(result.Output, svc.Launchd) {
-				status = "loaded"
-				ok = true
-			} else {
-				status = "not loaded"
-				ok = false
-			}
+			status, ok = b.launchdStatus(ctx, svc.Launchd)
 		}
 	}
 
@@ -401,6 +450,25 @@ func (b *Builtins) statusSingle(name string, svc config.Service) string {
 		portStr = fmt.Sprintf(" (:%d)", svc.Port)
 	}
 	return fmt.Sprintf("%s %s%s — %s", icon, name, portStr, status)
+}
+
+// launchdStatus asks launchd for the state of the LaunchAgent label on the
+// Mac. The label is matched exactly by launchctl print, where the former
+// grep of "launchctl list" also matched any label that contained it.
+func (b *Builtins) launchdStatus(ctx context.Context, label string) (string, bool) {
+	uid, err := b.launchdUID(ctx)
+	if err != nil {
+		return "unknown (" + err.Error() + ")", false
+	}
+
+	result, err := b.sshExec.Run(ctx, "launchctl", "print", launchdService(uid, label))
+	if err != nil {
+		return "unknown (" + err.Error() + ")", false
+	}
+	if result.ExitCode == launchctlNotFound {
+		return "not loaded", false
+	}
+	return parseLaunchctlPrint(result.Output)
 }
 
 func (b *Builtins) statusAll() string {
@@ -451,13 +519,13 @@ func (b *Builtins) Free(cmd Command) Response {
 	}
 
 	exec := b.execForTarget(target)
-	result, err := exec.Run(ctx, "free", "-h")
+	output, err := runMachineCommand(ctx, exec, b.commandsForTarget(target).memory)
 	if err != nil {
 		return errorResponse("Free Failed", err.Error())
 	}
 	return Response{
 		Title:    "💾 Memory",
-		Message:  fmt.Sprintf("💾 %s Memory\n%s", b.title(target), result.Output),
+		Message:  fmt.Sprintf("💾 %s Memory\n%s", b.title(target), output),
 		Priority: 3,
 	}
 }
@@ -545,14 +613,6 @@ func (b *Builtins) Logs(cmd Command) Response {
 		return errorResponse("Unknown Service", fmt.Sprintf("service %q not found.", cmd.Target))
 	}
 
-	if svc.Machine == "mac" {
-		return Response{
-			Title:    "📜 Logs",
-			Message:  fmt.Sprintf("Logs for Mac services not yet supported (service: %s)", name),
-			Priority: 3,
-		}
-	}
-
 	lines := b.cfg.Defaults.LogLines
 	if lines == 0 {
 		lines = 30
@@ -560,6 +620,10 @@ func (b *Builtins) Logs(cmd Command) Response {
 
 	ctx, cancel := b.timeout()
 	defer cancel()
+
+	if svc.Machine == "mac" {
+		return b.launchdLogs(ctx, name, svc, lines)
+	}
 
 	result, err := b.exec.Run(ctx, "sudo", "journalctl", "-u", svc.Systemd, "-n", fmt.Sprintf("%d", lines), "--no-pager")
 	if err != nil {
@@ -569,6 +633,38 @@ func (b *Builtins) Logs(cmd Command) Response {
 	return Response{
 		Title:    fmt.Sprintf("📜 %s Logs", name),
 		Message:  fmt.Sprintf("📜 %s Logs\n%s", name, result.Output),
+		Priority: 3,
+	}
+}
+
+// launchdLogs answers "logs" for a Mac service with the last lines of the
+// unified log of its process from the last ten minutes.
+func (b *Builtins) launchdLogs(ctx context.Context, name string, svc config.Service, lines int) Response {
+	if b.sshExec == nil {
+		return errorResponse("SSH Not Configured", "SSH executor not configured for Mac targets")
+	}
+
+	// The name goes inside a quoted string of log's predicate language,
+	// where a quote or a backslash would change the query.
+	process := launchdProcessName(svc.Launchd)
+	if process == "" || strings.ContainsAny(process, `"\`) {
+		return errorResponse("Logs Failed", fmt.Sprintf("cannot search the logs of %s: launchd label %q has no usable process name", name, svc.Launchd))
+	}
+
+	argv := logShowArgv(process)
+	result, err := b.sshExec.Run(ctx, argv[0], argv[1:]...)
+	if err != nil {
+		return errorResponse("Logs Failed", fmt.Sprintf("failed to fetch logs for %s: %s", name, err.Error()))
+	}
+
+	output := lastLogLines(result.Output, lines)
+	if output == "" {
+		output = fmt.Sprintf("No log lines in the last 10 minutes for process %q", process)
+	}
+
+	return Response{
+		Title:    fmt.Sprintf("📜 %s Logs", name),
+		Message:  fmt.Sprintf("📜 %s Logs\n%s", name, output),
 		Priority: 3,
 	}
 }
@@ -660,19 +756,12 @@ func (b *Builtins) Top(cmd Command) Response {
 		target = "vps"
 	}
 
+	// The table keeps the header and the busiest processes.
 	exec := b.execForTarget(target)
-	result, err := exec.Run(ctx, "ps", "aux", "--sort=-%cpu")
+	output, err := runMachineCommand(ctx, exec, b.commandsForTarget(target).processes)
 	if err != nil {
 		return errorResponse("Top Failed", err.Error())
 	}
-
-	// Show header + top 5 CPU processes
-	lines := strings.Split(strings.TrimRight(result.Output, "\n"), "\n")
-	limit := 6
-	if len(lines) < limit {
-		limit = len(lines)
-	}
-	output := strings.Join(lines[:limit], "\n")
 
 	return Response{
 		Title:    "📊 Top Processes",
@@ -693,13 +782,13 @@ func (b *Builtins) Ports(cmd Command) Response {
 	}
 
 	exec := b.execForTarget(target)
-	result, err := exec.Run(ctx, "ss", "-tlnp")
+	output, err := runMachineCommand(ctx, exec, b.commandsForTarget(target).ports)
 	if err != nil {
 		return errorResponse("Ports Failed", err.Error())
 	}
 	return Response{
 		Title:    "🔌 Listening Ports",
-		Message:  fmt.Sprintf("🔌 %s Listening Ports\n%s", b.title(target), result.Output),
+		Message:  fmt.Sprintf("🔌 %s Listening Ports\n%s", b.title(target), output),
 		Priority: 3,
 	}
 }
@@ -716,15 +805,36 @@ func (b *Builtins) Ip(cmd Command) Response {
 	}
 
 	exec := b.execForTarget(target)
-	result, err := exec.Run(ctx, "hostname", "-I")
+	output, err := firstAddressAnswer(ctx, exec, b.commandsForTarget(target).addresses)
 	if err != nil {
 		return errorResponse("IP Failed", err.Error())
 	}
 	return Response{
 		Title:    "🌐 IP Addresses",
-		Message:  fmt.Sprintf("🌐 %s IP Addresses\n%s", b.title(target), strings.TrimSpace(result.Output)),
+		Message:  fmt.Sprintf("🌐 %s IP Addresses\n%s", b.title(target), output),
 		Priority: 3,
 	}
+}
+
+// firstAddressAnswer runs the address commands in order and returns the text
+// of the first one that exits 0 with something to say. The last command
+// answers whatever it prints, so linux's single hostname -I behaves as it
+// always did.
+func firstAddressAnswer(ctx context.Context, exec executor.Executor, commands []machineCommand) (string, error) {
+	output := ""
+
+	for _, command := range commands {
+		result, err := exec.Run(ctx, command.argv[0], command.argv[1:]...)
+		if err != nil {
+			return "", err
+		}
+
+		output = command.text(result.Output)
+		if result.ExitCode == 0 && output != "" {
+			return output, nil
+		}
+	}
+	return output, nil
 }
 
 // ─── 18. Updates ─────────────────────────────────────────────────────────────
@@ -733,23 +843,17 @@ func (b *Builtins) Updates(cmd Command) Response {
 	ctx, cancel := b.timeout()
 	defer cancel()
 
-	result, err := b.exec.Run(ctx, "apt", "list", "--upgradable")
+	// The parser gives updates no target today, so this is the local
+	// machine; a "mac" target, if one arrives, gets the Mac's command.
+	target := cmd.Target
+	if target == "" {
+		target = "vps"
+	}
+
+	exec := b.execForTarget(target)
+	msg, err := runMachineCommand(ctx, exec, b.commandsForTarget(target).updates)
 	if err != nil {
 		return errorResponse("Updates Failed", err.Error())
-	}
-
-	// Strip the "Listing..." header line (tail -n +2 equivalent)
-	lines := strings.Split(result.Output, "\n")
-	var filtered []string
-	for _, line := range lines {
-		if line != "" && !strings.HasPrefix(line, "Listing...") {
-			filtered = append(filtered, line)
-		}
-	}
-
-	msg := strings.Join(filtered, "\n")
-	if strings.TrimSpace(msg) == "" {
-		msg = "System is up to date"
 	}
 
 	return Response{
@@ -837,13 +941,13 @@ func (b *Builtins) Connections(cmd Command) Response {
 	}
 
 	exec := b.execForTarget(target)
-	result, err := exec.Run(ctx, "ss", "-s")
+	output, err := runMachineCommand(ctx, exec, b.commandsForTarget(target).connections)
 	if err != nil {
 		return errorResponse("Connections Failed", err.Error())
 	}
 	return Response{
 		Title:    "🔗 Connections",
-		Message:  fmt.Sprintf("🔗 %s Connections\n%s", b.title(target), result.Output),
+		Message:  fmt.Sprintf("🔗 %s Connections\n%s", b.title(target), output),
 		Priority: 3,
 	}
 }
