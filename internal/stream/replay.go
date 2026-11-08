@@ -174,7 +174,12 @@ func (l *Listener) commit(id int) {
 // keeps it from coming back.
 func (l *Listener) expire(id int, text string, age time.Duration) {
 	l.commit(id)
-	l.logf("not running %q: posted %s ago, the replay window is %s", commandWord(text), age.Round(time.Second), l.replayWindow)
+
+	if age == 0 {
+		l.logf("not running %q: the message has no date to compare with the replay window", commandWord(text))
+	} else {
+		l.logf("not running %q: posted %s ago, the replay window is %s", commandWord(text), age.Round(time.Second), l.replayWindow)
+	}
 
 	expiry, ok := l.handler.(ExpiryHandler)
 	if !ok {
