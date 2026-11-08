@@ -131,18 +131,20 @@ echo "no bearer=${NOAUTH} bearer=${WITHAUTH} query=${QUERY} page=${PAGE} csp-hea
 step "restart Gotify"
 compose restart gotify >/dev/null
 wait_health
+# Post the ping at once, while the plugin is still dialling the stream with
+# its backoff. Gotify does not push stored messages to a client that connects
+# later; the plugin reads them on connect and must answer this one ping
+# without it being sent again.
+curl -fsS -H "X-Gotify-Key: ${APP_TOKEN}" -H 'Content-Type: application/json' -d '{"message":"ping"}' "${BASE}/message" >/dev/null || fail "could not post ping after restart"
 ENABLED="$(admin "${BASE}/plugin" | jq -r ".[] | select(.id==${PLUGIN_ID}) | .enabled")"
 [ "$ENABLED" = "true" ] || fail "plugin not enabled after restart"
-# The plugin reconnects to the stream with a backoff after Gotify comes back,
-# and a message posted before that is not replayed. Send ping again every few
-# seconds until the second pong shows up.
 tries=0
 until [ "$(admin "${BASE}/message?limit=30" | jq '[.messages[] | select(.extras["commander::response"]==true) | select(.message|test("pong";"i"))] | length')" -ge 2 ]; do
   tries=$((tries + 1))
-  [ "$tries" -le 8 ] || fail "no second pong after restart"
-  curl -fsS -H "X-Gotify-Key: ${APP_TOKEN}" -H 'Content-Type: application/json' -d '{"message":"ping"}' "${BASE}/message" >/dev/null
-  sleep 3
+  [ "$tries" -le 30 ] || fail "no second pong within 30 s of the restart: $(compose logs --since 2m gotify 2>&1 | grep '\[stream\]' | tail -5)"
+  sleep 1
 done
-echo "plugin answered after restart (ping attempts: ${tries})"
+echo "plugin answered the ping posted during the restart after ${tries} s"
+compose logs gotify 2>&1 | grep -E '\[stream\] (connected|replayed|first start|connection error)' | tail -4 || true
 
 echo "OK: gotify ${GOTIFY_VERSION} ${PLATFORM} plugin ${PLUGIN_VERSION}"

@@ -5,6 +5,15 @@ All notable changes to gotify-commander. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- New setting `defaults.replay_window`: how old a command posted while the
+  plugin was not connected may be and still run when it connects again. 5m by
+  default; `0s` turns the replay off. A negative value is refused when the
+  configuration is saved. Changing it reconnects the stream listener.
+- A command older than the replay window is not run. The reply is
+  "⌛ Command expired, not executed: <command>", with only the command word.
+
 ### Changed
 
 - New setting `defaults.rate_limit_per_minute` for the commands sent as Gotify
@@ -18,11 +27,21 @@ All notable changes to gotify-commander. The format follows
 
 ### Fixed
 
+- A command posted while the plugin was not connected to the Gotify stream
+  (a Gotify restart, a dropped connection) was never run: Gotify does not
+  push stored messages to a client that connects later. On every connection
+  the plugin now reads the newest 100 messages of the command app and runs,
+  oldest first, the ones it has not taken yet. A message that arrives both
+  ways runs once.
+- The ID of the last command taken is kept in the plugin storage, next to
+  the generated password, and saved before the command runs: a `reboot` or a
+  restart of Gotify is not run again on the way back up. On the first start
+  after the upgrade nothing in the history runs.
 - Saving the configuration in the Gotify UI no longer resets the command
   count, the last command and the uptime shown on the plugin page and by
   `/health`. The stream listener keeps its connection when `server_url`,
   `client_token` and `command_app_id` did not change; it reconnects only when
-  one of them did.
+  one of them, or `replay_window`, did.
 
 ### Security
 
