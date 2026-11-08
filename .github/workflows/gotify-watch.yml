@@ -1,0 +1,61 @@
+name: Gotify watch
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare with the latest Gotify release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # .gotify-version is written by scripts/pin-gotify.sh. Take the
+          # version from the line that names Gotify, or the first line.
+          line=$(grep -i -m1 gotify .gotify-version || head -n1 .gotify-version)
+          current=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<< "$line" | head -n1) || true
+          if [ -z "$current" ]; then
+            echo "No Gotify version found in .gotify-version"
+            exit 1
+          fi
+
+          # The highest version, not the newest by date: a 2.x patch can be
+          # published after a 3.x release.
+          latest=$(gh release list -R gotify/server --exclude-pre-releases --limit 5 --json tagName --jq '.[].tagName' \
+            | sed 's/^v//' | sort -V | tail -n1)
+          echo "Pinned Gotify $current, latest Gotify $latest"
+
+          newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)
+          if [ "$newest" = "$current" ]; then
+            echo "Up to date"
+            exit 0
+          fi
+
+          title="Gotify $latest released: rebuild the plugin"
+          # Read the titles first: piped into grep -q under pipefail, gh can die of
+          # SIGPIPE and the check would read as "no issue" and open a duplicate.
+          open_titles=$(gh issue list --state open --limit 100 --json title --jq '.[].title')
+          if grep -Fxq "$title" <<< "$open_titles"; then
+            echo "Issue already open: $title"
+            exit 0
+          fi
+
+          gh issue create --title "$title" --body-file - <<BODY
+          Gotify $latest is out (https://github.com/gotify/server/releases/tag/v$latest).
+          The plugin is pinned to Gotify $current, and a Go plugin only loads in
+          the Gotify release it was built with.
+
+          - [ ] \`scripts/pin-gotify.sh $latest\` and commit \`go.mod\`, \`go.sum\` and \`.gotify-version\`
+          - [ ] \`go test -race ./...\`
+          - [ ] add \`$latest\` to the \`gotify\` matrix in \`.github/workflows/release.yml\`
+          - [ ] update CHANGELOG.md and push a new tag
+          BODY

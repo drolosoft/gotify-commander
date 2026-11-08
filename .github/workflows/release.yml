@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Gotify ${{ matrix.gotify }} ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        gotify: ['2.9.1', '3.1.1']
+        arch: [amd64, arm64, arm-7]
+    env:
+      PLUGIN: gotify-commander-linux-${{ matrix.arch }}-for-gotify-${{ matrix.gotify }}.so
+    steps:
+      - uses: actions/checkout@v7
+      # The host Go is only for the scripts around the build. The plugin
+      # itself is compiled inside the gotify/build image for that Gotify
+      # release, which also cross-compiles arm64 and arm-7, so no QEMU is
+      # needed (the same approach as gotify/plugin-template).
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # VERSION is passed from the tag so the version shown on the Gotify
+      # plugin page does not pick up "-dirty" when go.mod is pinned to the
+      # target Gotify release during the build.
+      - name: Build plugin
+        run: make build-plugin GOTIFY_VERSION=${{ matrix.gotify }} ARCH=${{ matrix.arch }} VERSION="$GITHUB_REF_NAME"
+
+      # The container writes as root; the next steps write next to its output.
+      - name: Take ownership of build/
+        run: sudo chown -R "$(id -u):$(id -g)" build
+
+      - name: Check plugin ABI
+        run: scripts/check-plugin-abi.sh "build/$PLUGIN" ${{ matrix.gotify }}
+
+      # Written from inside build/ so the file holds the bare name and
+      # `sha256sum -c` works next to the downloaded .so.
+      - name: Checksum
+        working-directory: build
+        run: sha256sum "$PLUGIN" > "$PLUGIN.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PLUGIN }}
+          path: |
+            build/${{ env.PLUGIN }}
+            build/${{ env.PLUGIN }}.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: build
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+
+          # The section of CHANGELOG.md between "## [<version>]" and the next
+          # "## [" heading.
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+
+          {
+            echo
+            echo "## Compatibility"
+            echo
+            echo "A Go plugin only loads in the Gotify release it was built for."
+            echo "Pick the file for your Gotify version and architecture."
+            echo
+            echo "| Gotify | Architecture | File |"
+            echo "|--------|--------------|------|"
+            for file in build/*.so; do
+              name=$(basename "$file")
+              gotify=${name##*-for-gotify-}
+              gotify=${gotify%.so}
+              arch=${name#gotify-commander-linux-}
+              arch=${arch%-for-gotify-*}
+              echo "| $gotify | $arch | \`$name\` |"
+            done | sort -t '|' -k2,2Vr -k3,3
+            echo
+            echo "Each file has a \`.sha256\` next to it: \`sha256sum -c <file>.sha256\`."
+          } >> notes.md
+
+          cat notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/* --title "gotify-commander $GITHUB_REF_NAME" --notes-file notes.md
