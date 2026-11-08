@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +25,9 @@ const testAppID = 7
 const testToken = "C1ient-T0ken.secret"
 
 // fakeGotify is a websocket endpoint shaped like Gotify's /stream. It hands
-// every accepted connection and its handshake request to the test.
+// every accepted connection and its handshake request to the test. It also
+// answers GET /application/{id}/message from history, the way Gotify lists
+// the stored messages of an application.
 type fakeGotify struct {
 	server   *httptest.Server
 	requests chan *http.Request
@@ -36,6 +39,19 @@ type fakeGotify struct {
 
 	// release ends the handlers of silent connections when the test is done.
 	release chan struct{}
+
+	// fetches receives every request for the message list.
+	fetches chan *http.Request
+
+	// historyMu guards history and historyStatus, which the tests change
+	// while the listener reads them.
+	historyMu sync.Mutex
+
+	// history holds the stored messages of the command app, oldest first.
+	history []GotifyMessage
+
+	// historyStatus, when set, is answered instead of the message list.
+	historyStatus int
 }
 
 // newFakeGotify starts a fake server that is closed when the test ends.
@@ -47,8 +63,13 @@ func newFakeGotify(t *testing.T, silent bool) *fakeGotify {
 		conns:    make(chan *websocket.Conn, 16),
 		silent:   silent,
 		release:  make(chan struct{}),
+		fetches:  make(chan *http.Request, 16),
 	}
-	fake.server = httptest.NewServer(http.HandlerFunc(fake.serveStream))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", fake.serveStream)
+	mux.HandleFunc("GET /application/{id}/message", fake.serveMessages)
+	fake.server = httptest.NewServer(mux)
 
 	// Cleanups run last-in first-out: the silent handlers are released
 	// before the server waits for them in Close.
@@ -82,6 +103,55 @@ func (fake *fakeGotify) serveStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// serveMessages answers the message list of the command app, newest first
+// and wrapped in the paging object, as Gotify does.
+func (fake *fakeGotify) serveMessages(w http.ResponseWriter, r *http.Request) {
+	select {
+	case fake.fetches <- r:
+	default:
+	}
+
+	if r.PathValue("id") != strconv.Itoa(testAppID) {
+		http.NotFound(w, r)
+		return
+	}
+
+	fake.historyMu.Lock()
+	status := fake.historyStatus
+	newestFirst := make([]GotifyMessage, 0, len(fake.history))
+	for index := len(fake.history) - 1; index >= 0; index-- {
+		newestFirst = append(newestFirst, fake.history[index])
+	}
+	fake.historyMu.Unlock()
+
+	if status != 0 {
+		http.Error(w, "unavailable", status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"messages": newestFirst,
+		"paging":   map[string]any{"size": len(newestFirst), "limit": 100},
+	})
+}
+
+// store adds messages to the history of the command app.
+func (fake *fakeGotify) store(messages ...GotifyMessage) {
+	fake.historyMu.Lock()
+	defer fake.historyMu.Unlock()
+
+	fake.history = append(fake.history, messages...)
+}
+
+// failHistory makes the message list answer status from now on.
+func (fake *fakeGotify) failHistory(status int) {
+	fake.historyMu.Lock()
+	defer fake.historyMu.Unlock()
+
+	fake.historyStatus = status
 }
 
 // nextConn waits for the listener to connect and returns the server side.
@@ -121,10 +191,13 @@ func sendRaw(t *testing.T, conn *websocket.Conn, message GotifyMessage) {
 // ─── recording handler ───────────────────────────────────────────────────────
 
 // recordingHandler implements Handler for the tests. Handle runs hook (when
-// set) and then records the text; Busy records the text it was told about.
+// set) and then records the text; Busy and Expired record the text they were
+// told about, and Expired the age as well.
 type recordingHandler struct {
 	handled chan string
 	busy    chan string
+	expired chan string
+	ages    chan time.Duration
 	hook    func(ctx context.Context, text string)
 }
 
@@ -133,6 +206,8 @@ func newRecordingHandler(hook func(ctx context.Context, text string)) *recording
 	return &recordingHandler{
 		handled: make(chan string, 64),
 		busy:    make(chan string, 64),
+		expired: make(chan string, 64),
+		ages:    make(chan time.Duration, 64),
 		hook:    hook,
 	}
 }
@@ -148,6 +223,12 @@ func (handler *recordingHandler) Handle(ctx context.Context, text string) {
 // Busy implements Handler.
 func (handler *recordingHandler) Busy(text string) {
 	handler.busy <- text
+}
+
+// Expired implements Handler.
+func (handler *recordingHandler) Expired(text string, age time.Duration) {
+	handler.ages <- age
+	handler.expired <- text
 }
 
 // expect waits for the next text on channel and fails if it differs.

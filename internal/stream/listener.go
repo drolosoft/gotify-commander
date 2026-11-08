@@ -48,6 +48,17 @@ type GotifyMessage struct {
 	Title   string                 `json:"title"`
 	Message string                 `json:"message"`
 	Extras  map[string]interface{} `json:"extras"`
+
+	// Date is when Gotify stored the message. The replay compares it with
+	// the replay window; a live message is run whatever it says.
+	Date time.Time `json:"date"`
+}
+
+// pendingCommand is one command waiting in the queue. id is the Gotify
+// message ID, or 0 when the message carried none.
+type pendingCommand struct {
+	id   int
+	text string
 }
 
 // MessageHandler is the callback invoked for every matching message.
@@ -66,6 +77,21 @@ type MessageHandler func(text string)
 type Handler interface {
 	Handle(ctx context.Context, text string)
 	Busy(text string)
+}
+
+// ExpiryHandler is the optional part of a Handler that is told about the
+// commands the replay does not run.
+//
+// Expired runs on the read goroutine, like Busy, for a command posted while
+// the listener was not connected that is older than the replay window when
+// it connects again. The command is not run; age is how old it is, or 0 when
+// the message carried no date. A Handler without Expired gets nothing, and
+// the listener only logs the command word.
+//
+// It is a separate interface so the handlers written before the replay keep
+// satisfying Handler.
+type ExpiryHandler interface {
+	Expired(text string, age time.Duration)
 }
 
 // funcHandler adapts the original MessageHandler callback to Handler.
@@ -91,7 +117,31 @@ type Listener struct {
 	commandAppID int
 	handler      Handler
 	backoff      *Backoff
-	queue        chan string
+	queue        chan pendingCommand
+
+	// checkpoint keeps the ID of the last command taken, so a listener made
+	// after a Gotify restart knows which stored messages are new. It may be
+	// nil: the listener then remembers it only while it lives.
+	checkpoint Checkpoint
+
+	// replayWindow is how old a pending command may be and still run on
+	// connect. 0 turns the replay off.
+	replayWindow time.Duration
+
+	// historyClient reads the stored messages on connect.
+	historyClient *http.Client
+
+	// lastSeenID is the highest message ID taken from the stream or the
+	// history, and baselined says whether the checkpoint was read into it.
+	// Only the read loop touches them, across all its connections.
+	lastSeenID int
+	baselined  bool
+
+	// checkpointMu orders the saves of the read loop (expired and refused
+	// commands) and of the worker (commands about to run), and savedID is
+	// the highest ID saved, so the checkpoint never moves back.
+	checkpointMu sync.Mutex
+	savedID      int
 
 	// The timings are fields so tests can shrink them.
 	pingInterval time.Duration
@@ -117,19 +167,39 @@ func NewListener(serverURL, clientToken string, commandAppID int, handler Messag
 }
 
 // NewListenerWithHandler creates a Listener. Call Start() to begin receiving
-// messages and Stop() to end it.
+// messages and Stop() to end it. It replays pending commands up to
+// DefaultReplayWindow old and keeps its checkpoint in memory only; use
+// WithCheckpoint and WithReplayWindow before Start to change that.
 func NewListenerWithHandler(serverURL, clientToken string, commandAppID int, handler Handler) *Listener {
 	return &Listener{
-		serverURL:    serverURL,
-		clientToken:  clientToken,
-		commandAppID: commandAppID,
-		handler:      handler,
-		backoff:      NewBackoff(time.Second, 60*time.Second).WithJitter(0.2),
-		queue:        make(chan string, queueCapacity),
-		pingInterval: defaultPingInterval,
-		pongWait:     defaultPongWait,
-		stopTimeout:  defaultStopTimeout,
+		serverURL:     serverURL,
+		clientToken:   clientToken,
+		commandAppID:  commandAppID,
+		handler:       handler,
+		backoff:       NewBackoff(time.Second, 60*time.Second).WithJitter(0.2),
+		queue:         make(chan pendingCommand, queueCapacity),
+		replayWindow:  DefaultReplayWindow,
+		historyClient: &http.Client{Timeout: historyTimeout},
+		pingInterval:  defaultPingInterval,
+		pongWait:      defaultPongWait,
+		stopTimeout:   defaultStopTimeout,
 	}
+}
+
+// WithCheckpoint makes the listener keep the ID of the last command it took
+// in checkpoint, so the commands it took before a restart are not replayed.
+// Call it before Start.
+func (l *Listener) WithCheckpoint(checkpoint Checkpoint) *Listener {
+	l.checkpoint = checkpoint
+	return l
+}
+
+// WithReplayWindow sets how old a command posted while the listener was not
+// connected may be and still run when it connects; 0 turns the replay off.
+// Call it before Start.
+func (l *Listener) WithReplayWindow(window time.Duration) *Listener {
+	l.replayWindow = window
+	return l
 }
 
 // Start spawns the read loop and the worker that runs the commands. Calling
@@ -254,6 +324,11 @@ func (l *Listener) connect(ctx context.Context) error {
 	l.backoff.Reset()
 	l.logf("connected to %s", url)
 
+	// The socket is open before the history is read, so a command posted
+	// in between is in the history, on the socket or in both, never in
+	// neither; the IDs keep it from running twice.
+	l.replay(ctx)
+
 	// Any sign of life from the server (a pong to our ping, a ping of its
 	// own, a message) moves the deadline; silence for pongWait ends the read
 	// with a timeout and the loop dials again.
@@ -287,12 +362,17 @@ func (l *Listener) connect(ctx context.Context) error {
 		}
 		l.extendDeadline(conn)
 
-		text, ok := l.commandText(data)
+		message, text, ok := l.commandText(data)
 		if !ok {
 			continue
 		}
 
-		l.enqueue(text)
+		// The replay may have queued this message already.
+		if !l.claim(message.ID) {
+			continue
+		}
+
+		l.enqueue(pendingCommand{id: message.ID, text: text})
 	}
 }
 
@@ -316,15 +396,23 @@ func (l *Listener) extendDeadline(conn *websocket.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(l.pongWait))
 }
 
-// commandText decodes one stream message and returns the command it carries,
-// or false when the message is not a command for this plugin.
-func (l *Listener) commandText(data []byte) (string, bool) {
+// commandText decodes one stream message and returns it with the command it
+// carries, or false when the message is not a command for this plugin.
+func (l *Listener) commandText(data []byte) (GotifyMessage, string, bool) {
 	var msg GotifyMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		l.logf("could not parse message: %v", err)
-		return "", false
+		return msg, "", false
 	}
 
+	text, ok := l.commandOf(msg)
+	return msg, text, ok
+}
+
+// commandOf returns the command msg carries, or false when it is not a
+// command for this plugin: another application, a reply of the plugin
+// itself or an empty message.
+func (l *Listener) commandOf(msg GotifyMessage) (string, bool) {
 	if msg.AppID != l.commandAppID {
 		return "", false
 	}
@@ -344,16 +432,36 @@ func (l *Listener) commandText(data []byte) (string, bool) {
 	return text, text != ""
 }
 
-// enqueue hands text to the worker, or tells the handler it is busy when the
-// queue is full. It never blocks the read loop.
-func (l *Listener) enqueue(text string) {
+// claim records id as taken and reports whether it is new. IDs only grow in
+// Gotify, so anything at or below the last one taken was seen already. A
+// message without an ID (0) cannot be told apart and is always new.
+func (l *Listener) claim(id int) bool {
+	if id == 0 {
+		return true
+	}
+
+	if id <= l.lastSeenID {
+		return false
+	}
+
+	l.lastSeenID = id
+	return true
+}
+
+// enqueue hands pending to the worker, or tells the handler it is busy when
+// the queue is full. It never blocks the read loop.
+func (l *Listener) enqueue(pending pendingCommand) {
 	select {
-	case l.queue <- text:
+	case l.queue <- pending:
 	default:
 		// Only the command word goes to the log: the arguments can carry
 		// coordinates or other data the user did not mean to leave a trace.
-		l.logf("queue full (%d commands waiting), refusing %q", queueCapacity, commandWord(text))
-		l.busy(text)
+		l.logf("queue full (%d commands waiting), refusing %q", queueCapacity, commandWord(pending.text))
+
+		// The user was told it did not run; replaying it after a restart
+		// would run it behind their back.
+		l.commit(pending.id)
+		l.busy(pending.text)
 	}
 }
 
@@ -374,8 +482,13 @@ func (l *Listener) work(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case text := <-l.queue:
-			l.dispatch(ctx, text)
+		case pending := <-l.queue:
+			// The ID is saved before the command runs, not after: a
+			// "reboot" or "restart gotify" ends the process before Handle
+			// returns, and must not run again from the replay on the way
+			// back up.
+			l.commit(pending.id)
+			l.dispatch(ctx, pending.text)
 		}
 	}
 }
