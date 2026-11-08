@@ -56,3 +56,18 @@ func TestRedact(t *testing.T) {
 		}
 	}
 }
+
+// TestCommandWordKeepsOnlyTheVerb checks the busy log never carries arguments.
+func TestCommandWordKeepsOnlyTheVerb(t *testing.T) {
+	cases := map[string]string{
+		"locate 28.5 -17.8": "locate",
+		"  ping  ":          "ping",
+		"":                  "",
+	}
+
+	for input, want := range cases {
+		if got := commandWord(input); got != want {
+			t.Errorf("commandWord(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

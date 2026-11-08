@@ -29,9 +29,8 @@ const (
 )
 
 // defaultStopTimeout bounds how long Stop waits for a running command. The
-// commands do not all honour cancellation yet, and the plugin calls Stop
-// while holding the lock that Send needs, so an unbounded wait could hang
-// Gotify's disable call for the length of a command or forever.
+// commands do not all honour cancellation yet, so an unbounded wait could
+// hang Gotify's disable call for the length of a command.
 const defaultStopTimeout = 5 * time.Second
 
 // Lifecycle states of a Listener. A listener is single-use: once stopped it
@@ -351,7 +350,9 @@ func (l *Listener) enqueue(text string) {
 	select {
 	case l.queue <- text:
 	default:
-		l.logf("queue full (%d commands waiting), refusing %q", queueCapacity, text)
+		// Only the command word goes to the log: the arguments can carry
+		// coordinates or other data the user did not mean to leave a trace.
+		l.logf("queue full (%d commands waiting), refusing %q", queueCapacity, commandWord(text))
 		l.busy(text)
 	}
 }
@@ -445,4 +446,16 @@ func (l *Listener) wsURL() string {
 	}
 
 	return u + "/stream"
+}
+
+// commandWord returns the first word of a command line, or the whole line
+// when it has no spaces.
+func commandWord(text string) string {
+	fields := strings.Fields(text)
+
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[0]
 }
