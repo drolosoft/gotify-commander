@@ -3,7 +3,11 @@
 All notable changes to gotify-commander. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-08
+
+Built for Gotify 3.1.1 and 2.9.1, on amd64, arm64 and armv7. The 0.2.0 file
+loads only in Gotify 2.6.x; pick the file that matches your server from the
+compatibility table in the README.
 
 Upgrade note: SSH targets now need the remote host key in the `known_hosts`
 file of the user that runs Gotify (`ssh-keyscan -p <port> <host> >>
@@ -82,6 +86,20 @@ Until then, commands to that machine fail with a host key error.
 
 ### Added
 
+- `scripts/pin-gotify.sh <version>` pins `go.mod` to the Gotify server's
+  module versions and records them in `.gotify-version` and `.go-version`.
+  `scripts/check-plugin-abi.sh` compares a built `.so` with the server's
+  `go.mod` and fails on any mismatch.
+- `make build-plugin GOTIFY_VERSION=<v> ARCH=<arch>` builds inside the
+  official `gotify/build` images; `make build-all` covers the whole matrix.
+  The `deploy` targets with placeholder hosts are now a commented example.
+- GitHub Actions: `ci.yml` (gofmt, vet, race tests, govulncheck),
+  `release.yml` (matrix build, ABI check, checksums, release notes from this
+  file with a compatibility table) and `gotify-watch.yml` (weekly check for
+  new Gotify releases that opens an issue). Dependabot covers actions only.
+- `test/e2e/smoke.sh`: starts Gotify in Docker with the plugin, sends
+  `ping`, expects `pong`, checks the panel authentication and a restart.
+  Run against 3.1.1 and 2.9.1 on amd64 and arm64 before this release.
 - `SECURITY.md` with the reporting process and the threat model.
 - Tests for the panel routes, the executor timeouts, the stream queue,
   recovery and shutdown, SSH quoting and host key checks. Root package

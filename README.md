@@ -3,8 +3,8 @@
 <h1 align="center">gotify-commander</h1>
 
 <p align="center">
-  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
-  <a href="https://gotify.net"><img src="https://img.shields.io/badge/Gotify-2.x-blue" alt="Gotify"></a>
+  <a href="https://gotify.net"><img src="https://img.shields.io/badge/Gotify-3.1.1%20%7C%202.9.1-blue" alt="Gotify 3.1.1 and 2.9.1"></a>
+  <a href="https://github.com/drolosoft/gotify-commander/actions/workflows/ci.yml"><img src="https://github.com/drolosoft/gotify-commander/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://github.com/drolosoft/gotify-commander/releases"><img src="https://img.shields.io/github/v/release/drolosoft/gotify-commander" alt="GitHub Release"></a>
 </p>
@@ -57,14 +57,29 @@ Commands and responses flow through a **single unified Gotify app** -- no separa
 
 ## 🚀 Quick Start
 
-1. Download `gotify-commander-linux-amd64.so` from [Releases](../../releases)
-2. Drop it in Gotify's plugin directory (usually `/opt/gotify/data/plugins/`)
-3. Restart Gotify: `sudo systemctl restart gotify`
-4. Open the Gotify WebUI -> **Plugins** -> **gotify-commander** -> **Configure** -> paste your YAML
-5. Enable the plugin
-6. Send `help` from the Gotify app on your phone
+### Compatibility
 
-Open the web control panel from the plugin page in Gotify (**Plugins** -> **gotify-commander**). The same page shows the panel password.
+A Go plugin loads only when it was built with the same Go version and the same module versions as the Gotify binary. Each release ships one file per Gotify version and architecture, checked against the server's `go.mod` before publishing.
+
+| Gotify | amd64 | arm64 | armv7 |
+|--------|-------|-------|-------|
+| 3.1.1 (and 3.0.x) | `gotify-commander-linux-amd64-for-gotify-3.1.1.so` | `gotify-commander-linux-arm64-for-gotify-3.1.1.so` | `gotify-commander-linux-arm-7-for-gotify-3.1.1.so` |
+| 2.9.1 | `gotify-commander-linux-amd64-for-gotify-2.9.1.so` | `gotify-commander-linux-arm64-for-gotify-2.9.1.so` | `gotify-commander-linux-arm-7-for-gotify-2.9.1.so` |
+
+Other Gotify versions need their own build: `scripts/pin-gotify.sh <version>` and `make build-plugin GOTIFY_VERSION=<version>` (see Building from Source). The Android app must be 2.10.1 or newer to talk to Gotify 3.
+
+### Install on Gotify 3
+
+1. Download the file for your Gotify version and architecture from [Releases](../../releases) and check its `.sha256`.
+2. Copy it to Gotify's plugin directory (usually `/opt/gotify/data/plugins/`, or the `plugins` folder of your Docker data volume).
+3. Restart Gotify: `sudo systemctl restart gotify` (or `docker compose restart gotify`).
+4. In the Gotify WebUI, **Clients** -> **Create client**. Copy the token now: Gotify 3 shows tokens only once.
+5. **Plugins** -> **gotify-commander**. Note the plugin's app ID on that page.
+6. **Configure**: paste your YAML with `client_token` and `command_app_id`, then enable the plugin.
+7. The plugin page now shows the control panel link and, if `web_password` is empty, the generated password. Copy it from there; it is not sent anywhere else.
+8. Send `help` from the Gotify app on your phone.
+
+On Gotify 3 the phone app posts commands with your client token and the app ID (`appid`), so no application token is needed. This also means every client token of your account can post into the command app: create as few as you need. Clients created with an inactivity expiry are deleted by Gotify when they go unused; the client you give the plugin must be created without one (the default), or the plugin loses its stream after the expiry.
 
 ### Docker Installation
 
@@ -74,17 +89,17 @@ If you run Gotify in Docker, mount the plugin into the container:
 # docker-compose.yml
 services:
   gotify:
-    image: gotify/server:2.6.1
+    image: gotify/server:3.1.1          # gotify/server-arm64:3.1.1 on arm64
     volumes:
       - ./gotify-data:/app/data
-      - ./gotify-commander-linux-amd64.so:/app/data/plugins/gotify-commander.so
+      - ./gotify-commander-linux-amd64-for-gotify-3.1.1.so:/app/data/plugins/gotify-commander.so:ro
     ports:
       - "2006:80"
 ```
 
-Download `gotify-commander-linux-amd64.so` from [Releases](https://github.com/drolosoft/gotify-commander/releases) and place it next to your `docker-compose.yml`.
+Pin the image tag and pick the `.so` built for that tag. When you upgrade Gotify, download the matching plugin file as well; a mismatch shows up in the Gotify log as a plugin load error.
 
-**Important:** The `.so` file must be compiled with the exact same Go version as your Gotify image. The pre-built binary is compiled against Gotify 2.6.1.
+The same setup is what `test/e2e/smoke.sh` uses to check each release against Gotify 3.1.1 and 2.9.1.
 
 ---
 
@@ -235,9 +250,9 @@ Required fields per machine type:
 
 ### Getting Your Gotify Tokens
 
-1. **client_token**: Go to Gotify WebUI -> **Clients** -> Create a new client -> copy the token
-2. **command_app_id**: The plugin creates its own app (ID shown in Plugins page). Set this to that app's ID for unified commands + responses
-3. **response_app_token**: Not used in unified mode -- can be any valid app token
+1. **client_token**: Gotify WebUI -> **Clients** -> Create a new client -> copy the token. Gotify 3 shows it once; create the client without an inactivity expiry.
+2. **command_app_id**: The plugin creates its own app (ID shown in Plugins page). Set this to that app's ID for unified commands + responses.
+3. **response_app_token**: Deprecated and unused; leave it empty.
 
 ---
 
@@ -355,26 +370,27 @@ All other commands use standard Linux utilities (`systemctl`, `free`, `uptime`, 
 
 ## 🔨 Building from Source
 
-The plugin must be built on Linux with `CGO_ENABLED=1` (Go plugins require cgo).
+The plugin has to be built with the same Go version and module versions as the Gotify server. The Makefile does that inside the official `gotify/build` Docker images, the same way the Gotify plugin template does, so you need Docker and nothing else.
 
 ```bash
 git clone https://github.com/drolosoft/gotify-commander
 cd gotify-commander
-go build -buildmode=plugin -o gotify-commander.so .
-sudo cp gotify-commander.so /opt/gotify/data/plugins/
+make build-plugin GOTIFY_VERSION=3.1.1 ARCH=amd64    # arm64 and arm-7 work too
+sudo cp build/gotify-commander-linux-amd64-for-gotify-3.1.1.so /opt/gotify/data/plugins/gotify-commander.so
 sudo systemctl restart gotify
 ```
 
-**Using the Makefile:**
+`build-plugin` first pins `go.mod` to the server's versions (`scripts/pin-gotify.sh`), builds, and then runs `scripts/check-plugin-abi.sh`, which compares the Go version and every shared module in the `.so` against the server's `go.mod` and fails on any difference.
 
 ```bash
-make test          # run unit tests
-make lint          # go vet
-make deploy        # SSH -> build on VPS -> install -> restart Gotify
-make deploy-dev    # fast deploy, skip tests
+make test                           # go test ./...
+make lint                           # go vet
+make pin GOTIFY_VERSION=3.0.0       # pin go.mod to another Gotify release
+make build-all                      # {2.9.1, 3.1.1} x {amd64, arm64, arm-7} into build/
+test/e2e/smoke.sh 3.1.1 build/gotify-commander-linux-amd64-for-gotify-3.1.1.so
 ```
 
-The `deploy` target connects to your VPS via Tailscale, pulls the latest commit, builds in place, copies the `.so`, and restarts Gotify in one step.
+The smoke test starts Gotify in Docker with the plugin mounted, sends `ping`, waits for `pong`, checks the panel authentication and restarts the server. A weekly workflow opens an issue when Gotify publishes a new release so the plugin can be rebuilt.
 
 ---
 

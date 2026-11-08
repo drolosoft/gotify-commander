@@ -1,0 +1,16 @@
+# Smoke test environment: one Gotify server with the plugin mounted.
+# Driven by smoke.sh; the image and the .so come from the environment so the
+# same file serves Gotify 2.9.1 and 3.1.1 on amd64 and arm64.
+services:
+  gotify:
+    image: ${GOTIFY_IMAGE:-gotify/server:3.1.1}
+    platform: ${GOTIFY_PLATFORM:-linux/amd64}
+    container_name: ${GOTIFY_CONTAINER:-gotify-commander-smoke}
+    ports:
+      - "${GOTIFY_PORT:-18080}:80"
+    environment:
+      GOTIFY_DEFAULTUSER_NAME: admin
+      GOTIFY_DEFAULTUSER_PASS: ${GOTIFY_ADMIN_PASS:-smoke-admin}
+      GOTIFY_PLUGINSDIR: /app/data/plugins
+    volumes:
+      - ${PLUGIN_SO:?set PLUGIN_SO to the .so to test}:/app/data/plugins/gotify-commander.so:ro
