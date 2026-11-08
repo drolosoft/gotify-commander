@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # gotify-server.sh is sourced by pin-gotify.sh and check-plugin-abi.sh. It
 # downloads go.mod and GO_VERSION of one Gotify server tag into a cache, because
 # both files are fixed once a tag is released and the build matrix asks for the
