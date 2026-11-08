@@ -633,3 +633,143 @@ func TestRateLimiterWindow(t *testing.T) {
 		t.Error("window holds more calls than the limit")
 	}
 }
+
+// ─── Security headers and CSP ────────────────────────────────────────────────
+
+// noncePattern extracts the nonce from the Content-Security-Policy header.
+var noncePattern = regexp.MustCompile(`script-src 'nonce-([A-Za-z0-9_-]+)'`)
+
+func TestPageSecurityHeaders(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	response := panel.serve(get("", ""))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /: got %d", response.Code)
+	}
+
+	headers := response.Header()
+	policy := headers.Get("Content-Security-Policy")
+	match := noncePattern.FindStringSubmatch(policy)
+	if match == nil {
+		t.Fatalf("CSP has no script nonce: %q", policy)
+	}
+	nonce := match[1]
+
+	wantPolicy := "default-src 'none'; script-src 'nonce-" + nonce + "'; style-src 'nonce-" + nonce + "'; " +
+		"img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:; " +
+		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	if policy != wantPolicy {
+		t.Errorf("CSP\n got: %s\nwant: %s", policy, wantPolicy)
+	}
+
+	expected := map[string]string{
+		"X-Frame-Options":        "DENY",
+		"Cache-Control":          "no-store",
+		"Referrer-Policy":        "no-referrer",
+		"X-Content-Type-Options": "nosniff",
+	}
+	for header, want := range expected {
+		if got := headers.Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+
+	// Every script and style block carries this response's nonce, and no
+	// block is left without it.
+	html := response.Body.String()
+	scripts := strings.Count(html, "<script")
+	styles := strings.Count(html, "<style")
+	if scripts == 0 || styles == 0 {
+		t.Fatalf("page has %d scripts and %d styles", scripts, styles)
+	}
+	if got := strings.Count(html, `<script nonce="`+nonce+`">`); got != scripts {
+		t.Errorf("%d of %d <script> tags carry the nonce", got, scripts)
+	}
+	if got := strings.Count(html, `<style nonce="`+nonce+`">`); got != styles {
+		t.Errorf("%d of %d <style> tags carry the nonce", got, styles)
+	}
+	if strings.Contains(html, "{{") {
+		t.Errorf("page still has an unreplaced {{placeholder}}")
+	}
+
+	// Pico is inlined, so the page needs no CDN.
+	if !strings.Contains(html, "Pico CSS") {
+		t.Errorf("page does not inline Pico CSS")
+	}
+	for _, forbidden := range []string{"cdn.jsdelivr", "unpkg", "<link rel=\"stylesheet\"", "@import"} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("page references %q", forbidden)
+		}
+	}
+}
+
+func TestPageHasNothingTheCSPBlocks(t *testing.T) {
+	// The CSP has no 'unsafe-inline', so inline event handlers and style
+	// attributes would be dropped by the browser. The JS builds markup in
+	// strings too, which is why the source is checked and not only the DOM.
+	inlineHandler := regexp.MustCompile(`\son[a-z]+\s*=`)
+	if found := inlineHandler.FindString(commandUI); found != "" {
+		t.Errorf("commandUI has an inline event handler: %q", found)
+	}
+	if strings.Contains(commandUI, "style=") {
+		t.Errorf("commandUI has a style attribute")
+	}
+	if strings.Contains(commandUI, "javascript:") {
+		t.Errorf("commandUI has a javascript: URL")
+	}
+}
+
+func TestNonceChangesPerRequest(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	first := noncePattern.FindStringSubmatch(panel.serve(get("", "")).Header().Get("Content-Security-Policy"))
+	second := noncePattern.FindStringSubmatch(panel.serve(get("", "")).Header().Get("Content-Security-Policy"))
+	if first == nil || second == nil || first[1] == second[1] {
+		t.Errorf("nonce did not change between requests: %v %v", first, second)
+	}
+}
+
+func TestSecurityHeadersOnEveryRoute(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	requests := map[string]*http.Request{
+		"GET /icon":      get("icon", ""),
+		"GET /config":    get("config", testPassword),
+		"GET /health":    get("health", testPassword),
+		"401 on /config": get("config", ""),
+		"POST /execute":  executeRequestFor("ping", testPassword),
+		"415 on POST /execute": func() *http.Request {
+			request := executeRequestFor("ping", testPassword)
+			request.Header.Set("Content-Type", "text/plain")
+			return request
+		}(),
+	}
+	for name, request := range requests {
+		headers := panel.serve(request).Header()
+		if !strings.HasPrefix(headers.Get("Content-Security-Policy"), "default-src 'none'") {
+			t.Errorf("%s: no CSP", name)
+		}
+		if headers.Get("X-Frame-Options") != "DENY" || headers.Get("Cache-Control") != "no-store" ||
+			headers.Get("X-Content-Type-Options") != "nosniff" || headers.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("%s: missing security headers: %v", name, headers)
+		}
+	}
+}
+
+func TestCommandUICleanups(t *testing.T) {
+	if strings.Contains(strings.ToLower(commandUI), "seed history") {
+		t.Errorf("commandUI still seeds a fake history")
+	}
+	if strings.Contains(commandUI, "user-scalable=no") {
+		t.Errorf("commandUI still blocks zoom with user-scalable=no")
+	}
+	if strings.Contains(commandUI, "?token=") {
+		t.Errorf("commandUI still sends the password in the URL")
+	}
+	if !strings.Contains(commandUI, `"Authorization"`) || !strings.Contains(commandUI, "gc_token") {
+		t.Errorf("commandUI does not send the stored password as a Bearer header")
+	}
+	if !strings.Contains(commandUI, "<dialog") {
+		t.Errorf("commandUI has no password dialog")
+	}
+}
