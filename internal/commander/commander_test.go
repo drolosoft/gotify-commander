@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -600,6 +601,9 @@ func TestDangerousCommandsRunOneAtATime(t *testing.T) {
 	cfg.Categories = []config.Category{
 		{Label: "Careful", Type: "service", Commands: []string{"restart"}, Danger: true},
 	}
+	// The slot is what this test is about, so the messages run at once
+	// instead of asking for a code first.
+	cfg.RequireConfirm = []string{}
 	exec := newGatedExecutor("reboot")
 	sender := &mockSender{}
 	cmdr := New(cfg, exec, sender)
@@ -648,7 +652,10 @@ func TestDangerousCommandsRunOneAtATime(t *testing.T) {
 }
 
 func TestPanicInDangerousCommandFreesTheSlot(t *testing.T) {
-	cmdr, sender := newTestCommander("")
+	cfg := testConfig()
+	cfg.RequireConfirm = []string{}
+	sender := &mockSender{}
+	cmdr := New(cfg, &mockExecutor{}, sender)
 	panicOn(cmdr, command.ActionReboot)
 
 	cmdr.HandleCommand("reboot vps")
@@ -660,5 +667,408 @@ func TestPanicInDangerousCommandFreesTheSlot(t *testing.T) {
 	}
 	if strings.Contains(messages[1].message, "Another dangerous command") {
 		t.Errorf("shutdown after a panicked reboot was refused: %q", messages[1].message)
+	}
+}
+
+// ─── confirmation, enabled_commands and handover ─────────────────────────────
+
+// fakeClock is the clock of the message limiter and the confirmations in
+// these tests, moved by hand instead of sleeping through a minute.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// newFakeClock returns a clock stopped at a fixed time.
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)}
+}
+
+// read returns the time of the clock.
+func (clock *fakeClock) read() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+
+	return clock.now
+}
+
+// advance moves the clock forward by step.
+func (clock *fakeClock) advance(step time.Duration) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+
+	clock.now = clock.now.Add(step)
+}
+
+// newClockedCommander builds a commander for cfg whose message limiter and
+// confirmations read clock. Runs of blocked wait as in newGatedExecutor.
+func newClockedCommander(cfg *config.Config, blocked string, clock *fakeClock) (*Commander, *gatedExecutor, *mockSender) {
+	exec := newGatedExecutor(blocked)
+	sender := &mockSender{}
+	cmdr := New(cfg, exec, sender)
+
+	cmdr.messageLimiter = ratelimit.NewWithClock(cfg.Defaults.CommandsPerMinute(), time.Minute, clock.read)
+	cmdr.confirmations = command.NewConfirmations(clock.read)
+
+	return cmdr, exec, sender
+}
+
+// confirmationPattern matches the reply that asks for a code, and captures
+// the command and the code.
+var confirmationPattern = regexp.MustCompile("^⚠️ Confirm `([^`]+)`: reply `confirm ([0-9]{4})` within 60 s")
+
+// confirmationCode returns the code in reply, which must be a confirmation
+// request for want.
+func confirmationCode(t *testing.T, reply capturedMessage, want string) string {
+	t.Helper()
+
+	if reply.title != "⚠️ Confirmation needed" || reply.priority != 7 {
+		t.Fatalf("reply %+v, want a confirmation request with priority 7", reply)
+	}
+
+	match := confirmationPattern.FindStringSubmatch(reply.message)
+	if match == nil {
+		t.Fatalf("reply %q does not ask for a code", reply.message)
+	}
+	if match[1] != want {
+		t.Fatalf("reply asks to confirm %q, want %q", match[1], want)
+	}
+
+	return match[2]
+}
+
+// lastReply returns the last message sender recorded.
+func lastReply(t *testing.T, sender *mockSender) capturedMessage {
+	t.Helper()
+
+	messages := sender.snapshot()
+	if len(messages) == 0 {
+		t.Fatal("no reply was sent")
+	}
+	return messages[len(messages)-1]
+}
+
+func TestDangerousMessagesAskForConfirmation(t *testing.T) {
+	for _, input := range []string{"reboot vps", "shutdown vps", "stop nginx", "poweroff mac", "stop ng"} {
+		cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+
+		cmdr.Handle(context.Background(), input)
+
+		messages := sender.snapshot()
+		if len(messages) != 1 {
+			t.Fatalf("%s: got %d replies, want the confirmation request: %+v", input, len(messages), messages)
+		}
+
+		// The reply names the parsed command, so an alias shows what it
+		// resolved to.
+		parsed, err := command.Parse(input, cmdr.aliases, cmdr.services)
+		if err != nil {
+			t.Fatalf("%s: %v", input, err)
+		}
+		confirmationCode(t, messages[0], string(parsed.Action)+" "+parsed.Target)
+
+		if total := exec.count("sudo") + exec.count("systemctl"); total != 0 {
+			t.Errorf("%s: %d commands ran before the confirmation", input, total)
+		}
+		if count, _, _, _ := cmdr.Stats(); count != 0 {
+			t.Errorf("%s: stats count %d, want 0: nothing ran yet", input, count)
+		}
+	}
+}
+
+func TestConfirmRunsThePendingCommandOnce(t *testing.T) {
+	clock := newFakeClock()
+	cmdr, exec, sender := newClockedCommander(testConfig(), "", clock)
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
+
+	clock.advance(30 * time.Second)
+	cmdr.Handle(context.Background(), "confirm "+code)
+
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Fatalf("reboot ran %d times after the confirmation, want 1", runs)
+	}
+	if reply := lastReply(t, sender); !strings.Contains(reply.title, "Reboot") {
+		t.Errorf("reply to the confirmation %+v, want the reboot's own answer", reply)
+	}
+	if count, last, _, _ := cmdr.Stats(); count != 1 || last != "reboot vps" {
+		t.Errorf("stats %d, %q; want one reboot vps", count, last)
+	}
+
+	// The code is single use.
+	cmdr.Handle(context.Background(), "confirm "+code)
+
+	if reply := lastReply(t, sender); reply.message != "❌ No pending command for that code" {
+		t.Errorf("second confirm answered %q, want the no-pending reply", reply.message)
+	}
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("reboot ran %d times after a reused code, want 1", runs)
+	}
+}
+
+func TestConfirmWithAWrongCode(t *testing.T) {
+	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
+
+	wrong := "1000"
+	if code == wrong {
+		wrong = "1001"
+	}
+
+	for _, input := range []string{"confirm " + wrong, "confirm"} {
+		cmdr.Handle(context.Background(), input)
+
+		if reply := lastReply(t, sender); reply.message != "❌ No pending command for that code" {
+			t.Errorf("%q answered %q, want the no-pending reply", input, reply.message)
+		}
+	}
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("a wrong code ran %d commands", runs)
+	}
+}
+
+func TestConfirmAfterTheCodeExpired(t *testing.T) {
+	clock := newFakeClock()
+	cmdr, exec, sender := newClockedCommander(testConfig(), "", clock)
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	code := confirmationCode(t, lastReply(t, sender), "reboot vps")
+
+	clock.advance(61 * time.Second)
+	cmdr.Handle(context.Background(), "confirm "+code)
+
+	if reply := lastReply(t, sender); reply.message != "❌ No pending command for that code" {
+		t.Errorf("expired code answered %q, want the no-pending reply", reply.message)
+	}
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("an expired code ran %d commands", runs)
+	}
+}
+
+func TestNewDangerousCommandReplacesThePendingOne(t *testing.T) {
+	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	firstCode := confirmationCode(t, lastReply(t, sender), "reboot vps")
+
+	cmdr.Handle(context.Background(), "shutdown vps")
+	replacing := lastReply(t, sender)
+	secondCode := confirmationCode(t, replacing, "shutdown vps")
+	if !strings.Contains(replacing.message, "replaces `reboot vps`") {
+		t.Errorf("reply %q does not say it replaces the reboot", replacing.message)
+	}
+
+	cmdr.Handle(context.Background(), "confirm "+firstCode)
+	if reply := lastReply(t, sender); reply.message != "❌ No pending command for that code" {
+		t.Errorf("replaced code answered %q, want the no-pending reply", reply.message)
+	}
+
+	cmdr.Handle(context.Background(), "confirm "+secondCode)
+	if exec.count("sudo reboot") != 0 || exec.count("sudo shutdown") != 1 {
+		t.Errorf("runs %v, want only the shutdown", exec.runs)
+	}
+}
+
+func TestRebootWithoutTargetIsNotConfirmed(t *testing.T) {
+	cmdr, exec, sender := newClockedCommander(testConfig(), "", newFakeClock())
+
+	// There is nothing to confirm: the reboot answers with its usage.
+	cmdr.Handle(context.Background(), "reboot")
+
+	if reply := lastReply(t, sender); !strings.Contains(reply.message, "Target required") {
+		t.Errorf("reboot without a target answered %+v, want the usage", reply)
+	}
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("reboot without a target ran %d commands", runs)
+	}
+}
+
+func TestEmptyRequireConfirmRunsDirectly(t *testing.T) {
+	cfg := testConfig()
+	cfg.RequireConfirm = []string{}
+	cmdr, exec, sender := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("reboot with require_confirm: [] ran %d times, want 1", runs)
+	}
+	if reply := lastReply(t, sender); reply.title == "⚠️ Confirmation needed" {
+		t.Errorf("require_confirm: [] still asked for a code: %q", reply.message)
+	}
+}
+
+func TestRequireConfirmReplacesTheDefault(t *testing.T) {
+	cfg := testConfig()
+	cfg.RequireConfirm = []string{"logs"}
+	cmdr, exec, sender := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "logs ng")
+	confirmationCode(t, lastReply(t, sender), "logs nginx")
+
+	cmdr.Handle(context.Background(), "reboot vps")
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("reboot outside require_confirm ran %d times, want 1", runs)
+	}
+}
+
+func TestExecuteDoesNotAskForConfirmation(t *testing.T) {
+	cmdr, exec, _ := newClockedCommander(testConfig(), "", newFakeClock())
+
+	// The panel asks in the browser before it posts to /execute.
+	resp := cmdr.Execute("reboot vps")
+
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("Execute ran reboot %d times, want 1 (response %+v)", runs, resp)
+	}
+
+	// A confirm sent to the panel has no pending command to take.
+	resp = cmdr.Execute("confirm 1234")
+	if resp.Priority < 5 || resp.Title == "⚠️ Confirmation needed" {
+		t.Errorf("Execute(confirm) = %+v, want a rejection", resp)
+	}
+}
+
+func TestConfirmedCommandStillWaitsForTheDangerSlot(t *testing.T) {
+	cmdr, exec, sender := newClockedCommander(testConfig(), "reboot", newFakeClock())
+
+	cmdr.Handle(context.Background(), "shutdown vps")
+	code := confirmationCode(t, lastReply(t, sender), "shutdown vps")
+
+	// A reboot from the panel holds the slot while the code is typed.
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		cmdr.Execute("reboot vps")
+	}()
+	<-exec.started
+
+	cmdr.Handle(context.Background(), "confirm "+code)
+
+	if reply := lastReply(t, sender); reply.message != "⚠️ Another dangerous command is still running" {
+		t.Errorf("confirm during a reboot answered %q, want the danger refusal", reply.message)
+	}
+	if runs := exec.count("sudo shutdown"); runs != 0 {
+		t.Errorf("shutdown ran %d times while the reboot held the slot", runs)
+	}
+
+	close(exec.release)
+	<-finished
+}
+
+func TestEnabledCommandsDisableTheOthers(t *testing.T) {
+	cfg := testConfig()
+	cfg.EnabledCommands = []string{"ping", "uptime"}
+	cmdr, exec, sender := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+
+	// A disabled command is refused before any confirmation is asked.
+	reply := lastReply(t, sender)
+	if reply.message != "🚫 Command disabled by configuration" {
+		t.Errorf("disabled reboot answered %+v, want the disabled reply", reply)
+	}
+
+	// The panel is refused the same way.
+	if resp := cmdr.Execute("reboot vps"); resp.Message != "🚫 Command disabled by configuration" {
+		t.Errorf("Execute(reboot vps) = %+v, want the disabled reply", resp)
+	}
+
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("a disabled command ran %d times", runs)
+	}
+	if count, _, _, _ := cmdr.Stats(); count != 0 {
+		t.Errorf("stats count %d, want 0: a disabled command is not counted", count)
+	}
+
+	cmdr.Handle(context.Background(), "ping")
+	if reply := lastReply(t, sender); reply.message != "pong" {
+		t.Errorf("enabled ping answered %q, want pong", reply.message)
+	}
+}
+
+func TestEmptyEnabledCommandsEnablesEverything(t *testing.T) {
+	cfg := testConfig()
+	cfg.EnabledCommands = []string{}
+	cfg.RequireConfirm = []string{}
+	cmdr, exec, _ := newClockedCommander(cfg, "", newFakeClock())
+
+	cmdr.Handle(context.Background(), "reboot vps")
+
+	if runs := exec.count("sudo reboot"); runs != 1 {
+		t.Errorf("reboot with enabled_commands: [] ran %d times, want 1", runs)
+	}
+}
+
+func TestInheritCarriesTheLimiterTheSlotAndTheStats(t *testing.T) {
+	clock := newFakeClock()
+	cfg := testConfig()
+	cfg.RequireConfirm = []string{}
+	old, oldExec, _ := newClockedCommander(cfg, "reboot", clock)
+
+	for range 20 {
+		old.Handle(context.Background(), "uptime")
+	}
+
+	// A reboot still waiting for the host holds the old commander's slot.
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		old.Execute("reboot vps")
+	}()
+	<-oldExec.started
+
+	replacement, exec, sender := newClockedCommander(cfg, "", clock)
+	replacement.Inherit(old)
+
+	// The minute's budget goes on: a saved configuration is not a way
+	// around the limit.
+	replacement.Handle(context.Background(), "uptime")
+	if reply := lastReply(t, sender); reply.title != "⏳ Rate limited" {
+		t.Errorf("first message after the handover answered %+v, want rate limited", reply)
+	}
+
+	// The reboot started on the old commander still holds the slot.
+	if resp := replacement.Execute("shutdown vps"); resp.Message != "⚠️ Another dangerous command is still running" {
+		t.Errorf("shutdown during the old reboot answered %q, want the danger refusal", resp.Message)
+	}
+	if runs := exec.count("sudo"); runs != 0 {
+		t.Errorf("replacement ran %d privileged commands during the old reboot", runs)
+	}
+
+	if count, _, _, _ := replacement.Stats(); count != 20 {
+		t.Errorf("stats count after Inherit %d, want the old 20", count)
+	}
+
+	close(oldExec.release)
+	<-finished
+
+	// Once the old reboot returns, the shared slot is free for the new one.
+	replacement.Execute("shutdown vps")
+	if runs := exec.count("sudo shutdown"); runs != 1 {
+		t.Errorf("shutdown after the old reboot finished ran %d times, want 1", runs)
+	}
+}
+
+func TestInheritKeepsAFreshLimiterWhenTheLimitChanged(t *testing.T) {
+	clock := newFakeClock()
+	old, _, _ := newClockedCommander(testConfig(), "", clock)
+
+	for range 20 {
+		old.Handle(context.Background(), "uptime")
+	}
+
+	// The administrator raised the limit; the new value must apply now.
+	cfg := testConfig()
+	cfg.Defaults.RateLimitPerMinute = 30
+	replacement, exec, _ := newClockedCommander(cfg, "", clock)
+	replacement.Inherit(old)
+
+	replacement.Handle(context.Background(), "uptime")
+	if runs := exec.count("uptime"); runs != 1 {
+		t.Errorf("uptime after raising the limit ran %d times, want 1", runs)
 	}
 }
