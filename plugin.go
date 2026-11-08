@@ -89,7 +89,7 @@ type Plugin struct {
 
 	// newListener builds the stream listener for a configuration. It is a
 	// field so the tests can check the lock order without a Gotify server.
-	newListener func(cfg *config.Config, handler stream.Handler) streamListener
+	newListener func(cfg *config.Config, handler stream.Handler, checkpoint stream.Checkpoint) streamListener
 }
 
 // streamListener is the part of stream.Listener the plugin uses.
@@ -99,9 +99,12 @@ type streamListener interface {
 }
 
 // newGotifyListener builds the real listener on the Gotify stream of cfg,
-// handing every command to handler.
-func newGotifyListener(cfg *config.Config, handler stream.Handler) streamListener {
-	return stream.NewListenerWithHandler(cfg.Gotify.ServerURL, cfg.Gotify.ClientToken, cfg.Gotify.CommandAppID, handler)
+// handing every command to handler. On every connection it replays the
+// commands posted since the one in checkpoint, up to the replay window old.
+func newGotifyListener(cfg *config.Config, handler stream.Handler, checkpoint stream.Checkpoint) streamListener {
+	return stream.NewListenerWithHandler(cfg.Gotify.ServerURL, cfg.Gotify.ClientToken, cfg.Gotify.CommandAppID, handler).
+		WithCheckpoint(checkpoint).
+		WithReplayWindow(cfg.Defaults.ReplayWindow)
 }
 
 // commandRelay is the stream.Handler the plugin gives its listener. It hands
@@ -111,11 +114,16 @@ func newGotifyListener(cfg *config.Config, handler stream.Handler) streamListene
 type commandRelay struct {
 	mu        sync.RWMutex
 	commander *commander.Commander
+
+	// sender answers the commands that expired before they could run; the
+	// commander never sees them.
+	sender commander.Sender
 }
 
-// newCommandRelay returns a relay that hands commands to cmdr.
-func newCommandRelay(cmdr *commander.Commander) *commandRelay {
-	return &commandRelay{commander: cmdr}
+// newCommandRelay returns a relay that hands commands to cmdr and answers
+// the expired ones through sender.
+func newCommandRelay(cmdr *commander.Commander, sender commander.Sender) *commandRelay {
+	return &commandRelay{commander: cmdr, sender: sender}
 }
 
 // set makes cmdr the commander of every command that arrives from now on. A
@@ -146,8 +154,37 @@ func (relay *commandRelay) Busy(text string) {
 	relay.current().Busy(text)
 }
 
+// expiredPriority is the priority of the answer to an expired command: the
+// same as a refusal for a full queue, since in both cases nothing ran.
+const expiredPriority = 5
+
+// Expired implements stream.ExpiryHandler by telling the user that a command
+// posted while the plugin was disconnected was too old to run. Only the
+// command word is repeated: the arguments can carry data the user would not
+// want pushed to every client again.
+func (relay *commandRelay) Expired(text string, age time.Duration) {
+	message := "⌛ Command expired, not executed: " + firstWord(text)
+	if age > 0 {
+		message += fmt.Sprintf(" (sent %s ago).", age.Round(time.Second))
+	}
+
+	relay.sender.Send("⌛ Command expired", message, expiredPriority, false)
+}
+
+// firstWord returns the first word of text, or an empty string for a blank
+// one.
+func firstWord(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[0]
+}
+
 // sameConnection reports whether the listener of previous would read the
-// same stream as one built for next: same server, token and command app.
+// same stream as one built for next: same server, token and command app,
+// and the same replay window, which the listener takes when it is built.
 func sameConnection(previous, next *config.Config) bool {
 	if previous == nil {
 		return false
@@ -155,13 +192,89 @@ func sameConnection(previous, next *config.Config) bool {
 
 	return previous.Gotify.ServerURL == next.Gotify.ServerURL &&
 		previous.Gotify.ClientToken == next.Gotify.ClientToken &&
-		previous.Gotify.CommandAppID == next.Gotify.CommandAppID
+		previous.Gotify.CommandAppID == next.Gotify.CommandAppID &&
+		previous.Defaults.ReplayWindow == next.Defaults.ReplayWindow
 }
 
 // pluginState is what the plugin keeps in its Gotify storage blob. It is JSON
 // so later fields can be added without breaking the stored password.
 type pluginState struct {
 	PanelPassword string `json:"panel_password"`
+
+	// Stream is the checkpoint of the stream listener. A blob written
+	// before it existed has none, which the listener takes as a first run.
+	Stream *streamState `json:"stream,omitempty"`
+}
+
+// streamState is the last command the listener took from one command app of
+// one Gotify server. Message IDs only mean something on the server that
+// gave them, so the checkpoint is kept with the server and the app.
+type streamState struct {
+	ServerURL     string `json:"server_url"`
+	CommandAppID  int    `json:"command_app_id"`
+	LastMessageID int    `json:"last_message_id"`
+}
+
+// streamCheckpoint is the stream.Checkpoint of one listener, kept in the
+// plugin storage blob next to the generated password.
+type streamCheckpoint struct {
+	plugin       *Plugin
+	serverURL    string
+	commandAppID int
+}
+
+// streamCheckpoint returns the checkpoint of a listener on the stream of
+// cfg.
+func (p *Plugin) streamCheckpoint(cfg *config.Config) *streamCheckpoint {
+	return &streamCheckpoint{
+		plugin:       p,
+		serverURL:    cfg.Gotify.ServerURL,
+		commandAppID: cfg.Gotify.CommandAppID,
+	}
+}
+
+// Load implements stream.Checkpoint. A checkpoint saved for another server
+// or command app gives 0, the first run, which replays nothing.
+func (checkpoint *streamCheckpoint) Load() (int, error) {
+	p := checkpoint.plugin
+
+	// The listener calls this from its own goroutine. p.mu orders it with
+	// the password, which reads and writes the same blob, and nobody holds
+	// p.mu while waiting for the listener (Disable stops it outside).
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	state, err := p.readState()
+	if err != nil {
+		return 0, err
+	}
+
+	if state.Stream == nil || state.Stream.ServerURL != checkpoint.serverURL || state.Stream.CommandAppID != checkpoint.commandAppID {
+		return 0, nil
+	}
+	return state.Stream.LastMessageID, nil
+}
+
+// Save implements stream.Checkpoint. The blob is read first and written
+// back with the new ID; when it cannot be read nothing is written, since a
+// blank state would drop the stored password.
+func (checkpoint *streamCheckpoint) Save(id int) error {
+	p := checkpoint.plugin
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	state, err := p.readState()
+	if err != nil {
+		return err
+	}
+
+	state.Stream = &streamState{
+		ServerURL:     checkpoint.serverURL,
+		CommandAppID:  checkpoint.commandAppID,
+		LastMessageID: id,
+	}
+	return p.saveState(state)
 }
 
 // panelPasswordBytes is the amount of randomness in a generated password:
@@ -376,26 +489,38 @@ func (p *Plugin) ensurePanelPassword() {
 
 // loadState reads the plugin storage blob. Missing, empty or unreadable
 // storage gives an empty state, which makes the caller generate a password.
+// The caller must hold p.mu.
 func (p *Plugin) loadState() pluginState {
+	state, err := p.readState()
+	if err != nil {
+		log.Printf("[plugin] %v", err)
+		return pluginState{}
+	}
+	return state
+}
+
+// readState reads the plugin storage blob. Missing or empty storage is an
+// empty state; storage that cannot be read or is not JSON is an error, so a
+// caller about to write the blob back can leave it alone instead. The caller
+// must hold p.mu.
+func (p *Plugin) readState() (pluginState, error) {
 	var state pluginState
 	if p.storageHandler == nil {
-		return state
+		return state, nil
 	}
 
 	blob, err := p.storageHandler.Load()
 	if err != nil {
-		log.Printf("[plugin] could not read the plugin storage: %v", err)
-		return state
+		return state, fmt.Errorf("could not read the plugin storage: %w", err)
 	}
 	if len(blob) == 0 {
-		return state
+		return state, nil
 	}
 
 	if err := json.Unmarshal(blob, &state); err != nil {
-		log.Printf("[plugin] plugin storage is not valid JSON, starting over: %v", err)
-		return pluginState{}
+		return pluginState{}, fmt.Errorf("plugin storage is not valid JSON, starting over: %w", err)
 	}
-	return state
+	return state, nil
 }
 
 // saveState writes the plugin storage blob.
@@ -524,8 +649,8 @@ func (p *Plugin) startListener(cfg *config.Config) {
 		return
 	}
 
-	p.relay = newCommandRelay(p.cmdr)
-	p.listener = p.newListener(cfg, p.relay)
+	p.relay = newCommandRelay(p.cmdr, p)
+	p.listener = p.newListener(cfg, p.relay, p.streamCheckpoint(cfg))
 	p.listener.Start()
 }
 
