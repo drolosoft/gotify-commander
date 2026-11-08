@@ -3,7 +3,12 @@
 All notable changes to gotify-commander. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.4.0] - 2026-11-08
+
+Same build matrix as 0.3.0: Gotify 3.1.1 and 2.9.1, on amd64, arm64 and
+armv7. No configuration change is required to upgrade; every new setting is
+optional and off by default except the message rate limit, which is now 20
+per minute.
 
 ### Added
 
