@@ -22,6 +22,7 @@ import (
 	plugin "github.com/gotify/plugin-api"
 
 	"github.com/drolosoft/gotify-commander/internal/command"
+	"github.com/drolosoft/gotify-commander/internal/commander"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
@@ -1033,6 +1034,141 @@ func TestConfigChangeRestartsListener(t *testing.T) {
 	current.push(t, 1, "services")
 	current.push(t, 7, "ping")
 	messages.waitForTitle(t, "Ping", "Services")
+}
+
+// fakeStreamConfig returns a configuration on fake whose listener connects
+// with token and reads commands from app 1.
+func fakeStreamConfig(fake *fakeStream, token string) *config.Config {
+	cfg := configWithPasswordAndServer(testPassword)
+	cfg.Gotify.ServerURL = fake.server.URL
+	cfg.Gotify.ClientToken = token
+	cfg.Gotify.CommandAppID = 1
+	return cfg
+}
+
+// enableOnFakeStream enables a plugin on fake, runs one ping through the
+// stream and returns the plugin, its messages and the open connection.
+func enableOnFakeStream(t *testing.T, fake *fakeStream) (*Plugin, *recordingMessages, *streamConnection) {
+	t.Helper()
+
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	messages := newRecordingMessages()
+	instance.SetMessageHandler(messages)
+	instance.SetStorageHandler(&memoryStorage{})
+
+	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-one")); err != nil {
+		t.Fatalf("first config: %v", err)
+	}
+	if err := instance.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	t.Cleanup(func() { instance.Disable() })
+	messages.waitForTitle(t, "Commander Online")
+
+	connection := fake.next(t)
+	connection.push(t, 1, "ping")
+	messages.waitForTitle(t, "Ping")
+
+	return instance, messages, connection
+}
+
+// currentStats returns the stats of the commander the plugin runs now.
+func currentStats(instance *Plugin) commander.Stats {
+	instance.mu.Lock()
+	cmdr := instance.cmdr
+	instance.mu.Unlock()
+
+	return cmdr.Snapshot()
+}
+
+func TestSavingTheSameConnectionKeepsListenerAndStats(t *testing.T) {
+	fake := newFakeStream(t)
+	instance, _, connection := enableOnFakeStream(t, fake)
+	before := currentStats(instance)
+
+	// Saving the configuration in the Gotify UI calls ValidateAndSetConfig
+	// with a new value, even when the Gotify settings did not change.
+	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-one")); err != nil {
+		t.Fatalf("second config: %v", err)
+	}
+
+	after := currentStats(instance)
+	if after.CommandCount != 1 {
+		t.Errorf("command count after the save = %d, want 1", after.CommandCount)
+	}
+	if !after.StartTime.Equal(before.StartTime) {
+		t.Errorf("start time after the save = %v, want %v from Enable", after.StartTime, before.StartTime)
+	}
+
+	select {
+	case reconnected := <-fake.connections:
+		t.Fatalf("the listener reconnected with token %q although the connection settings did not change", reconnected.token)
+	case <-connection.closed:
+		t.Fatal("the listener dropped its connection although the connection settings did not change")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestSavingTheSameConnectionDispatchesToTheNewCommander(t *testing.T) {
+	fake := newFakeStream(t)
+	instance, messages, connection := enableOnFakeStream(t, fake)
+
+	instance.mu.Lock()
+	previous := instance.cmdr
+	instance.mu.Unlock()
+
+	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-one")); err != nil {
+		t.Fatalf("second config: %v", err)
+	}
+
+	instance.mu.Lock()
+	replacement := instance.cmdr
+	instance.mu.Unlock()
+	if replacement == previous {
+		t.Fatal("the commander was not rebuilt for the new configuration")
+	}
+
+	// The second ping travels over the connection opened before the save.
+	// Only the new commander counting it shows the listener hands commands
+	// to the commander of the current configuration.
+	connection.push(t, 1, "ping")
+	messages.waitForTitle(t, "Ping")
+
+	if count := currentStats(instance).CommandCount; count != 2 {
+		t.Errorf("command count of the new commander = %d, want 2", count)
+	}
+	if count, _, _, _ := previous.Stats(); count != 1 {
+		t.Errorf("the old commander ran the second ping: count %d, want 1", count)
+	}
+}
+
+func TestSavingANewTokenReconnectsAndKeepsStats(t *testing.T) {
+	fake := newFakeStream(t)
+	instance, _, old := enableOnFakeStream(t, fake)
+	before := currentStats(instance)
+
+	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-two")); err != nil {
+		t.Fatalf("second config: %v", err)
+	}
+
+	current := fake.next(t)
+	if current.token != "token-two" {
+		t.Fatalf("connection after the change used token %q, want token-two", current.token)
+	}
+
+	select {
+	case <-old.closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the listener of the old token is still connected")
+	}
+
+	after := currentStats(instance)
+	if after.CommandCount != 1 {
+		t.Errorf("command count after the reconnect = %d, want 1", after.CommandCount)
+	}
+	if !after.StartTime.Equal(before.StartTime) {
+		t.Errorf("start time after the reconnect = %v, want %v from Enable", after.StartTime, before.StartTime)
+	}
 }
 
 func TestConfigWithUnknownCommandIsRefused(t *testing.T) {

@@ -3,6 +3,16 @@
 All notable changes to gotify-commander. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- Saving the configuration in the Gotify UI no longer resets the command
+  count, the last command and the uptime shown on the plugin page and by
+  `/health`. The stream listener keeps its connection when `server_url`,
+  `client_token` and `command_app_id` did not change; it reconnects only when
+  one of them did.
+
 ## [0.3.0] - 2026-11-08
 
 Built for Gotify 3.1.1 and 2.9.1, on amd64, arm64 and armv7. The 0.2.0 file

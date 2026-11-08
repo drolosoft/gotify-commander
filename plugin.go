@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -67,6 +68,11 @@ type Plugin struct {
 	startTime      time.Time
 	webhookPath    string // full path to the control panel UI
 
+	// relay is the handler the running listener holds. A configuration
+	// saved with the same Gotify connection points it at a new commander
+	// instead of reconnecting.
+	relay *commandRelay
+
 	// panelPassword is the generated control panel password, used only
 	// while web_password is empty. It is shown on the plugin page and kept
 	// in the plugin storage so it survives restarts.
@@ -93,6 +99,60 @@ type streamListener interface {
 // handing every command to handler.
 func newGotifyListener(cfg *config.Config, handler stream.Handler) streamListener {
 	return stream.NewListenerWithHandler(cfg.Gotify.ServerURL, cfg.Gotify.ClientToken, cfg.Gotify.CommandAppID, handler)
+}
+
+// commandRelay is the stream.Handler the plugin gives its listener. It hands
+// every command to the commander of the current configuration, so saving the
+// configuration in the Gotify UI swaps the commander without dropping the
+// websocket.
+type commandRelay struct {
+	mu        sync.RWMutex
+	commander *commander.Commander
+}
+
+// newCommandRelay returns a relay that hands commands to cmdr.
+func newCommandRelay(cmdr *commander.Commander) *commandRelay {
+	return &commandRelay{commander: cmdr}
+}
+
+// set makes cmdr the commander of every command that arrives from now on. A
+// command already running finishes on the commander it started on.
+func (relay *commandRelay) set(cmdr *commander.Commander) {
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+
+	relay.commander = cmdr
+}
+
+// current returns the commander commands go to now.
+func (relay *commandRelay) current() *commander.Commander {
+	relay.mu.RLock()
+	defer relay.mu.RUnlock()
+
+	return relay.commander
+}
+
+// Handle implements stream.Handler by running text on the current commander.
+func (relay *commandRelay) Handle(ctx context.Context, text string) {
+	relay.current().Handle(ctx, text)
+}
+
+// Busy implements stream.Handler by letting the current commander answer
+// that text was refused.
+func (relay *commandRelay) Busy(text string) {
+	relay.current().Busy(text)
+}
+
+// sameConnection reports whether the listener of previous would read the
+// same stream as one built for next: same server, token and command app.
+func sameConnection(previous, next *config.Config) bool {
+	if previous == nil {
+		return false
+	}
+
+	return previous.Gotify.ServerURL == next.Gotify.ServerURL &&
+		previous.Gotify.ClientToken == next.Gotify.ClientToken &&
+		previous.Gotify.CommandAppID == next.Gotify.CommandAppID
 }
 
 // pluginState is what the plugin keeps in its Gotify storage blob. It is JSON
@@ -233,6 +293,7 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 	}
 
 	p.mu.Lock()
+	previous := p.cfg
 	p.cfg = cfg
 
 	// Gotify applies a new configuration without calling Enable again. If
@@ -247,11 +308,22 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 		return nil
 	}
 
+	// Gotify calls this on every save in its UI, most of the time with the
+	// same connection. The running listener is kept, and only the commander
+	// it hands commands to is replaced. Without a listener (another save is
+	// between stopping and starting one) the slow path below starts it.
+	if p.listener != nil && sameConnection(previous, cfg) {
+		p.replaceCommander(cfg)
+		p.mu.Unlock()
+		return nil
+	}
+
 	// The running listener still has the old server, token and command app.
 	// It is stopped outside the lock, as in Disable, and before the new one
 	// starts, so a command is never read and run by both.
 	old := p.listener
 	p.listener = nil
+	p.relay = nil
 	p.mu.Unlock()
 
 	if old != nil {
@@ -267,7 +339,8 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 		return nil
 	}
 
-	p.startCommander(cfg)
+	p.replaceCommander(cfg)
+	p.startListener(cfg)
 	return nil
 }
 
@@ -399,6 +472,7 @@ func (p *Plugin) Disable() error {
 	p.mu.Lock()
 	listener := p.listener
 	p.listener = nil
+	p.relay = nil
 	p.enabled = false
 	p.mu.Unlock()
 
@@ -411,21 +485,52 @@ func (p *Plugin) Disable() error {
 	return nil
 }
 
-// startCommander builds the commander for cfg and, when the Gotify
-// connection is configured, starts a stream listener that hands it every
-// command. The caller must hold p.mu.
+// startCommander builds a commander for cfg with fresh stats and, when the
+// Gotify connection is configured, starts a stream listener that hands it
+// every command. Enable calls it, so the uptime counts from here. The caller
+// must hold p.mu.
 func (p *Plugin) startCommander(cfg *config.Config) {
-	// The Plugin itself is the Sender. The SSH executor for the mac target
-	// is wired inside commander.New.
-	cmdr := commander.New(cfg, executor.NewLocalExecutor(), p)
+	p.cmdr = newCommander(cfg, p)
+	p.startListener(cfg)
+}
+
+// replaceCommander builds a commander for cfg that carries on the stats of
+// the current one, and points the running listener, if any, at it. The
+// caller must hold p.mu.
+func (p *Plugin) replaceCommander(cfg *config.Config) {
+	cmdr := newCommander(cfg, p)
+
+	// The plugin page and /health read these counters; a saved
+	// configuration is not a restart, so they go on from where they were.
+	if p.cmdr != nil {
+		cmdr.SetStats(p.cmdr.Snapshot())
+	}
 	p.cmdr = cmdr
 
+	if p.relay != nil {
+		p.relay.set(cmdr)
+	}
+}
+
+// startListener starts a stream listener on the Gotify connection of cfg
+// that hands every command to p.cmdr through a relay. Without a server URL
+// or a client token there is nothing to listen to. The caller must hold
+// p.mu.
+func (p *Plugin) startListener(cfg *config.Config) {
 	if cfg.Gotify.ServerURL == "" || cfg.Gotify.ClientToken == "" {
 		return
 	}
 
-	p.listener = p.newListener(cfg, cmdr)
+	p.relay = newCommandRelay(p.cmdr)
+	p.listener = p.newListener(cfg, p.relay)
 	p.listener.Start()
+}
+
+// newCommander builds the commander for cfg. The Plugin itself is the
+// Sender, and the SSH executor for the mac target is wired inside
+// commander.New.
+func newCommander(cfg *config.Config, sender commander.Sender) *commander.Commander {
+	return commander.New(cfg, executor.NewLocalExecutor(), sender)
 }
 
 // ─── Webhooker interface ──────────────────────────────────────────────────────
