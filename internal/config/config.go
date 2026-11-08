@@ -24,15 +24,21 @@ type Config struct {
 	Services    map[string]Service   `yaml:"services"`
 	Categories  []Category           `yaml:"categories"`
 	WebPassword string               `yaml:"web_password"`
-	WebURL      string               `yaml:"-"`        // full control panel URL, set at runtime
+	WebURL      string               `yaml:"-"` // full control panel URL, set at runtime
 }
 
 // GotifyConfig holds Gotify server connection settings.
 type GotifyConfig struct {
-	ServerURL        string `yaml:"server_url"`
-	BaseURL          string `yaml:"base_url"`
-	ClientToken      string `yaml:"client_token"`
-	CommandAppID     int    `yaml:"command_app_id"`
+	ServerURL    string `yaml:"server_url"`
+	BaseURL      string `yaml:"base_url"`
+	ClientToken  string `yaml:"client_token"`
+	CommandAppID int    `yaml:"command_app_id"`
+
+	// ResponseAppToken is not used: replies go out through the plugin's own
+	// message handler. The field stays so configurations that still carry
+	// it keep loading.
+	//
+	// Deprecated: leave it empty or remove it from the configuration.
 	ResponseAppToken string `yaml:"response_app_token"`
 }
 
@@ -48,6 +54,11 @@ type SSHTarget struct {
 	Port    int    `yaml:"port"`
 	User    string `yaml:"user"`
 	KeyFile string `yaml:"key_file"`
+
+	// KnownHostsFile is the known_hosts file the host key is checked
+	// against. Empty means ~/.ssh/known_hosts of the user running Gotify,
+	// which a service or a container user often does not have.
+	KnownHostsFile string `yaml:"known_hosts_file"`
 }
 
 // Service represents a single managed service.
@@ -93,11 +104,10 @@ func Validate(cfg *Config) error {
 	if cfg.Gotify.ClientToken == "" {
 		return fmt.Errorf("gotify.client_token is required")
 	}
-	if cfg.Gotify.CommandAppID == 0 {
-		return fmt.Errorf("gotify.command_app_id is required")
-	}
-	if cfg.Gotify.ResponseAppToken == "" {
-		return fmt.Errorf("gotify.response_app_token is required")
+	// Gotify application IDs start at 1. A zero or negative ID matches no
+	// message, so the plugin would listen and never run anything.
+	if cfg.Gotify.CommandAppID <= 0 {
+		return fmt.Errorf("gotify.command_app_id must be an application ID greater than 0, got %d", cfg.Gotify.CommandAppID)
 	}
 
 	// Service validation.
@@ -121,6 +131,29 @@ func Validate(cfg *Config) error {
 		if target.Port == 0 {
 			target.Port = 22
 			cfg.SSHTargets[name] = target
+		}
+	}
+
+	return nil
+}
+
+// ValidateCategoryCommands checks that every command listed in
+// categories[].commands is one of known, the names the command registry
+// handles. It is separate from Validate because the registry lives in a
+// package that imports this one.
+func ValidateCategoryCommands(cfg *Config, known []string) error {
+	knownSet := make(map[string]bool, len(known))
+	for _, name := range known {
+		knownSet[name] = true
+	}
+
+	// A misspelt name would put a button on the panel that only ever
+	// answers "unknown command", so it is refused here instead.
+	for _, category := range cfg.Categories {
+		for _, name := range category.Commands {
+			if !knownSet[name] {
+				return fmt.Errorf("category %q: unknown command %q", category.Label, name)
+			}
 		}
 	}
 

@@ -2,6 +2,9 @@ package commander
 
 import (
 	"context"
+	"log"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -329,4 +332,87 @@ func TestHandleCommandForbiddenService(t *testing.T) {
 	if len(messages) != 1 || messages[0].priority < 7 {
 		t.Errorf("expected one rejection for a service outside the whitelist, got %+v", messages)
 	}
+}
+
+func TestCommandNamesMatchRegistry(t *testing.T) {
+	names := CommandNames()
+
+	// Every name must reach a handler, and the ones the default panel tabs
+	// use must be there.
+	cmd, _ := newTestCommander("")
+	for _, name := range names {
+		if _, ok := cmd.registry.Lookup(command.Action(name)); !ok {
+			t.Errorf("CommandNames lists %q but the registry has no handler for it", name)
+		}
+	}
+	for _, want := range []string{"help", "locate", "reboot", "traffic", "analytics"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("CommandNames() = %v, missing %q", names, want)
+		}
+	}
+	if len(names) != 23 {
+		t.Errorf("CommandNames() has %d names, want the 23 builtins", len(names))
+	}
+}
+
+func TestSSHTargetKnownHostsFileReachesExecutor(t *testing.T) {
+	cfg := testConfig()
+	cfg.SSHTargets["mac"] = config.SSHTarget{
+		Host:           "100.64.0.2",
+		User:           "admin",
+		KeyFile:        "/home/admin/.ssh/id_ed25519",
+		KnownHostsFile: "/home/admin/.ssh/known_hosts",
+	}
+
+	cmd := New(cfg, &mockExecutor{}, &mockSender{})
+
+	sshExec, ok := cmd.sshExec.(*executor.SSHExecutor)
+	if !ok {
+		t.Fatalf("sshExec is %T, want *executor.SSHExecutor", cmd.sshExec)
+	}
+	if sshExec.KnownHostsFile != "/home/admin/.ssh/known_hosts" {
+		t.Errorf("KnownHostsFile = %q, want the configured file", sshExec.KnownHostsFile)
+	}
+}
+
+func TestLogsDoNotCarryCommandArguments(t *testing.T) {
+	logs := &strings.Builder{}
+	var logsMu sync.Mutex
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		return logs.Write(p)
+	}))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// The longitude is out of range, so Locate answers without calling
+	// Nominatim; the latitude is what must not reach the log.
+	cmd, _ := newTestCommander("")
+	cmd.HandleCommand("locate 40.4168 -300.5")
+
+	// A command dropped because the plugin is stopping is logged too.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd.Handle(cancelled, "where 28.4682 -16.2546")
+
+	logsMu.Lock()
+	written := logs.String()
+	logsMu.Unlock()
+
+	for _, coordinate := range []string{"40.4168", "300.5", "28.4682", "16.2546"} {
+		if strings.Contains(written, coordinate) {
+			t.Errorf("log carries the coordinate %s:\n%s", coordinate, written)
+		}
+	}
+	if !strings.Contains(written, "action=locate") || !strings.Contains(written, `dropped "where"`) {
+		t.Errorf("log does not name the commands:\n%s", written)
+	}
+}
+
+// writerFunc turns a function into an io.Writer for log.SetOutput.
+type writerFunc func(p []byte) (int, error)
+
+// Write calls the function.
+func (write writerFunc) Write(p []byte) (int, error) {
+	return write(p)
 }

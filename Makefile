@@ -7,7 +7,10 @@ VPS_REPO ?= /path/to/gotify-commander
 VPS_PLUGIN_DIR ?= /path/to/gotify/data/plugins
 GOTIFY_SERVICE := gotify
 GOTIFY_BUILD_IMAGE := gotify/build:1.26.0-linux-amd64
-DOCKER_GO_BUILD := go build -mod=readonly -a -installsuffix cgo -buildmode=plugin
+# The plugin reports VERSION on the Gotify plugin page and in the User-Agent
+# of locate. It is computed here, before ssh, from the local checkout.
+LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+DOCKER_GO_BUILD := go build -mod=readonly -a -installsuffix cgo -buildmode=plugin $(LDFLAGS)
 
 .PHONY: test lint build deploy deploy-dev clean help
 

@@ -23,17 +23,28 @@ import (
 	"github.com/gin-gonic/gin"
 	plugin "github.com/gotify/plugin-api"
 
+	"github.com/drolosoft/gotify-commander/internal/command"
 	"github.com/drolosoft/gotify-commander/internal/commander"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/executor"
 	"github.com/drolosoft/gotify-commander/internal/stream"
 )
 
+// version is the plugin version. The Makefile sets it from git describe with
+// -ldflags "-X main.version=..."; a build without the flag says "dev".
+var version = "dev"
+
+// init hands the version to the command package, which sends it in the
+// User-Agent of locate and cannot import main to read it.
+func init() {
+	command.Version = version
+}
+
 // GetGotifyPluginInfo returns plugin metadata used by the Gotify server for identification.
 func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		ModulePath:  "github.com/drolosoft/gotify-commander",
-		Version:     "0.2.0",
+		Version:     version,
 		Author:      "Drolosoft",
 		Name:        "Gotify Commander",
 		Website:     "https://drolosoft.com",
@@ -50,7 +61,7 @@ type Plugin struct {
 	storageHandler plugin.StorageHandler
 	cfg            *config.Config
 	cmdr           *commander.Commander
-	listener       *stream.Listener
+	listener       streamListener
 	enabled        bool
 	mu             sync.Mutex
 	startTime      time.Time
@@ -66,6 +77,22 @@ type Plugin struct {
 	// must not be able to start an unbounded number of them.
 	executeSlots   chan struct{}
 	executeLimiter *rateLimiter
+
+	// newListener builds the stream listener for a configuration. It is a
+	// field so the tests can check the lock order without a Gotify server.
+	newListener func(cfg *config.Config, handler stream.Handler) streamListener
+}
+
+// streamListener is the part of stream.Listener the plugin uses.
+type streamListener interface {
+	Start()
+	Stop()
+}
+
+// newGotifyListener builds the real listener on the Gotify stream of cfg,
+// handing every command to handler.
+func newGotifyListener(cfg *config.Config, handler stream.Handler) streamListener {
+	return stream.NewListenerWithHandler(cfg.Gotify.ServerURL, cfg.Gotify.ClientToken, cfg.Gotify.CommandAppID, handler)
 }
 
 // pluginState is what the plugin keeps in its Gotify storage blob. It is JSON
@@ -91,11 +118,49 @@ const (
 
 // NewGotifyPluginInstance is the factory function called by Gotify when loading the plugin.
 func NewGotifyPluginInstance(ctx plugin.UserContext) plugin.Plugin {
+	// Gotify makes an instance for every user, and every command runs on
+	// the server as the Gotify process. That is the administrator's call
+	// to make, so any other user gets an instance that only says so.
+	if !ctx.Admin {
+		return disabledPlugin{}
+	}
+
 	return &Plugin{
 		userCtx:        ctx,
 		executeSlots:   make(chan struct{}, maxConcurrentExecute),
 		executeLimiter: newRateLimiter(executeRateLimit, executeRateWindow),
+		newListener:    newGotifyListener,
 	}
+}
+
+// ─── Users who are not administrators ────────────────────────────────────────
+
+// adminOnly is the reason a user who is not a Gotify administrator sees, on
+// the plugin page and when trying to enable the plugin.
+const adminOnly = "Only Gotify administrators can use gotify-commander"
+
+// disabledPlugin is the instance of a user who is not a Gotify administrator.
+// It implements only Plugin and Displayer: Gotify calls the other interfaces
+// only when a plugin implements them, so this one gets no webhook routes, no
+// configuration, no message handler and no stream.
+type disabledPlugin struct{}
+
+// Enable refuses with the reason, which Gotify shows to the user and which
+// keeps the plugin disabled for them.
+func (disabledPlugin) Enable() error {
+	return errors.New("only Gotify administrators can use gotify-commander")
+}
+
+// Disable has nothing to stop.
+func (disabledPlugin) Disable() error {
+	return nil
+}
+
+// GetDisplay explains on the plugin page why the plugin does nothing.
+func (disabledPlugin) GetDisplay(*url.URL) string {
+	return "## gotify-commander\n\n" +
+		"**" + adminOnly + ".**\n\n" +
+		"It runs commands on this server, so only a Gotify administrator can enable it.\n"
 }
 
 // ─── commander.Sender implementation ─────────────────────────────────────────
@@ -163,9 +228,11 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 	if err := config.Validate(cfg); err != nil {
 		return err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if err := config.ValidateCategoryCommands(cfg, commander.CommandNames()); err != nil {
+		return err
+	}
 
+	p.mu.Lock()
 	p.cfg = cfg
 
 	// Gotify applies a new configuration without calling Enable again. If
@@ -174,6 +241,33 @@ func (p *Plugin) ValidateAndSetConfig(conf interface{}) error {
 	if p.enabled && cfg.WebPassword == "" {
 		p.ensurePanelPassword()
 	}
+
+	if !p.enabled {
+		p.mu.Unlock()
+		return nil
+	}
+
+	// The running listener still has the old server, token and command app.
+	// It is stopped outside the lock, as in Disable, and before the new one
+	// starts, so a command is never read and run by both.
+	old := p.listener
+	p.listener = nil
+	p.mu.Unlock()
+
+	if old != nil {
+		old.Stop()
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// While the lock was free a Disable, an Enable or a newer configuration
+	// may have run; each of them leaves the plugin as it should be.
+	if !p.enabled || p.cfg != cfg || p.listener != nil {
+		return nil
+	}
+
+	p.startCommander(cfg)
 	return nil
 }
 
@@ -276,13 +370,6 @@ func (p *Plugin) Enable() error {
 		p.cfg = cfg
 	}
 
-	// Build executors.
-	localExec := executor.NewLocalExecutor()
-
-	// Create commander (Plugin itself is the Sender).
-	// SSH wiring for Mac Mini is handled automatically inside commander.New.
-	cmdr := commander.New(cfg, localExec, p)
-
 	// cfg.WebURL is left empty on purpose. help prints it when it is set,
 	// and the panel URL carries the plugin token, which Gotify does not
 	// check: anyone who reads a help reply could open the panel. The link
@@ -292,22 +379,8 @@ func (p *Plugin) Enable() error {
 		p.ensurePanelPassword()
 	}
 
-	p.cmdr = cmdr
 	p.startTime = time.Now()
-
-	// Create and start the stream listener if Gotify connection details are present.
-	if cfg.Gotify.ServerURL != "" && cfg.Gotify.ClientToken != "" {
-		p.listener = stream.NewListener(
-			cfg.Gotify.ServerURL,
-			cfg.Gotify.ClientToken,
-			cfg.Gotify.CommandAppID,
-			func(text string) {
-				p.cmdr.HandleCommand(text)
-			},
-		)
-		p.listener.Start()
-	}
-
+	p.startCommander(cfg)
 	p.enabled = true
 
 	// Announce online — done outside the lock via goroutine to avoid deadlock
@@ -324,15 +397,35 @@ func (p *Plugin) Enable() error {
 // Disable stops the stream listener and marks the plugin as disabled.
 func (p *Plugin) Disable() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	listener := p.listener
+	p.listener = nil
+	p.enabled = false
+	p.mu.Unlock()
 
-	if p.listener != nil {
-		p.listener.Stop()
-		p.listener = nil
+	// Stop waits for the command in flight, and that command ends with
+	// Send, which takes p.mu. Under the lock, Stop would wait for itself
+	// until its timeout and the reply would be lost.
+	if listener != nil {
+		listener.Stop()
+	}
+	return nil
+}
+
+// startCommander builds the commander for cfg and, when the Gotify
+// connection is configured, starts a stream listener that hands it every
+// command. The caller must hold p.mu.
+func (p *Plugin) startCommander(cfg *config.Config) {
+	// The Plugin itself is the Sender. The SSH executor for the mac target
+	// is wired inside commander.New.
+	cmdr := commander.New(cfg, executor.NewLocalExecutor(), p)
+	p.cmdr = cmdr
+
+	if cfg.Gotify.ServerURL == "" || cfg.Gotify.ClientToken == "" {
+		return
 	}
 
-	p.enabled = false
-	return nil
+	p.listener = p.newListener(cfg, cmdr)
+	p.listener.Start()
 }
 
 // ─── Webhooker interface ──────────────────────────────────────────────────────

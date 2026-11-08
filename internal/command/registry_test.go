@@ -36,3 +36,14 @@ func TestRegistry(t *testing.T) {
 		t.Error("expected ActionReboot to not be found in registry")
 	}
 }
+
+func TestRegistryNames(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(ActionPing, func(Command) Response { return Response{} })
+	reg.Register(ActionDf, func(Command) Response { return Response{} })
+
+	names := reg.Names()
+	if len(names) != 2 || names[0] != "df" || names[1] != "ping" {
+		t.Errorf("Names() = %v, want [df ping] in order", names)
+	}
+}

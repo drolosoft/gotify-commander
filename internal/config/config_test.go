@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,9 +188,14 @@ func TestValidateConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "missing response_app_token fails",
-			mutate:  func(c *Config) { c.Gotify.ResponseAppToken = "" },
+			name:    "negative command_app_id fails",
+			mutate:  func(c *Config) { c.Gotify.CommandAppID = -3 },
 			wantErr: true,
+		},
+		{
+			name:    "missing response_app_token passes, it is deprecated",
+			mutate:  func(c *Config) { c.Gotify.ResponseAppToken = "" },
+			wantErr: false,
 		},
 		{
 			name: "invalid machine fails",
@@ -226,6 +232,53 @@ func TestValidateConfig(t *testing.T) {
 				t.Errorf("expected no error but got: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateCategoryCommands(t *testing.T) {
+	known := []string{"free", "df", "help", "locate"}
+
+	cfg := DefaultConfig()
+	cfg.Categories = []Category{
+		{Label: "Machine", Type: "machine", Commands: []string{"free", "df"}},
+		{Label: "Info", Type: "direct", Commands: []string{"help", "locate"}},
+	}
+	if err := ValidateCategoryCommands(cfg, known); err != nil {
+		t.Errorf("known commands: unexpected error %v", err)
+	}
+
+	// No categories is valid: the panel falls back to its own tabs.
+	if err := ValidateCategoryCommands(DefaultConfig(), known); err != nil {
+		t.Errorf("no categories: unexpected error %v", err)
+	}
+
+	// A typo would give a button that only ever answers "unknown command",
+	// so the configuration is refused and the error names the culprit.
+	cfg.Categories = append(cfg.Categories, Category{Label: "Danger", Commands: []string{"free", "reboott"}})
+	err := ValidateCategoryCommands(cfg, known)
+	if err == nil {
+		t.Fatal("unknown command reboott: expected an error")
+	}
+	if !strings.Contains(err.Error(), `"reboott"`) || !strings.Contains(err.Error(), `"Danger"`) {
+		t.Errorf("error %q does not name the command and its category", err)
+	}
+}
+
+func TestParseKnownHostsFile(t *testing.T) {
+	cfg, err := ParseYAML([]byte(`
+ssh_targets:
+  mac:
+    host: "100.64.0.2"
+    user: "admin"
+    key_file: "/home/admin/.ssh/id_ed25519"
+    known_hosts_file: "/home/admin/.ssh/known_hosts"
+`))
+	if err != nil {
+		t.Fatalf("ParseYAML: %v", err)
+	}
+
+	if got := cfg.SSHTargets["mac"].KnownHostsFile; got != "/home/admin/.ssh/known_hosts" {
+		t.Errorf("known_hosts_file = %q, want /home/admin/.ssh/known_hosts", got)
 	}
 }
 
