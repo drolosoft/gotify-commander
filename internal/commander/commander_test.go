@@ -515,50 +515,52 @@ func (e *gatedExecutor) count(program string) int {
 	return total
 }
 
+// TestHandleRateLimitsMessages: with the default of 20 a minute, the 21st
+// message inside one minute is answered with the wait and not run.
 func TestHandleRateLimitsMessages(t *testing.T) {
 	exec := newGatedExecutor("")
 	sender := &mockSender{}
 	cmdr := New(testConfig(), exec, sender)
 
-	// The clock moves 5 s per command, so all eleven fall inside one minute
-	// and the eleventh arrives 50 s after the first.
+	// The clock moves 2 s per command, so all twenty-one fall inside one
+	// minute and the twenty-first arrives 40 s after the first.
 	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	cmdr.messageLimiter = ratelimit.NewWithClock(config.DefaultRateLimitPerMinute, time.Minute, func() time.Time { return now })
 
-	for attempt := 1; attempt <= config.DefaultRateLimitPerMinute; attempt++ {
+	for range 20 {
 		cmdr.Handle(context.Background(), "uptime")
-		now = now.Add(5 * time.Second)
+		now = now.Add(2 * time.Second)
 	}
 	cmdr.Handle(context.Background(), "uptime")
 
-	if runs := exec.count("uptime"); runs != config.DefaultRateLimitPerMinute {
-		t.Errorf("executor ran uptime %d times, want %d", runs, config.DefaultRateLimitPerMinute)
+	if runs := exec.count("uptime"); runs != 20 {
+		t.Errorf("executor ran uptime %d times, want 20", runs)
 	}
 
 	messages := sender.snapshot()
-	if len(messages) != config.DefaultRateLimitPerMinute+1 {
-		t.Fatalf("got %d replies, want %d", len(messages), config.DefaultRateLimitPerMinute+1)
+	if len(messages) != 21 {
+		t.Fatalf("got %d replies, want 21", len(messages))
 	}
 
 	refused := messages[len(messages)-1]
 	if refused.title != "⏳ Rate limited" {
 		t.Errorf("title %q, want %q", refused.title, "⏳ Rate limited")
 	}
-	if refused.message != "⏳ Too many commands, try again in 10 s" {
+	if refused.message != "⏳ Too many commands, try again in 20 s" {
 		t.Errorf("message %q, want the wait until the first command leaves the minute", refused.message)
 	}
 	if refused.priority != 5 {
 		t.Errorf("priority %d, want 5", refused.priority)
 	}
-	if count, _, _, _ := cmdr.Stats(); count != config.DefaultRateLimitPerMinute {
-		t.Errorf("stats count %d, want %d: a refused command does not count", count, config.DefaultRateLimitPerMinute)
+	if count, _, _, _ := cmdr.Stats(); count != 20 {
+		t.Errorf("stats count %d, want 20: a refused command does not count", count)
 	}
 
 	// A minute after the first command, its slot is free again.
-	now = now.Add(10 * time.Second)
+	now = now.Add(20 * time.Second)
 	cmdr.Handle(context.Background(), "uptime")
-	if runs := exec.count("uptime"); runs != config.DefaultRateLimitPerMinute+1 {
-		t.Errorf("after the window moved: executor ran uptime %d times, want %d", runs, config.DefaultRateLimitPerMinute+1)
+	if runs := exec.count("uptime"); runs != 21 {
+		t.Errorf("after the window moved: executor ran uptime %d times, want 21", runs)
 	}
 }
 

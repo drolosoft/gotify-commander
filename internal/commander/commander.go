@@ -137,7 +137,7 @@ func (c *Commander) HandleCommand(input string) {
 
 // Handle is HandleCommand with a context, and with Busy it lets the stream
 // listener hand commands to the Commander directly. Messages are rate
-// limited (defaults.rate_limit_per_minute, 10 by default): one over the
+// limited (defaults.rate_limit_per_minute, 20 by default): one over the
 // limit is answered with how long to wait and is not run. A command whose
 // context is already cancelled (the plugin is being disabled) is dropped
 // without a reply. A panic in a command is recovered, logged with its stack

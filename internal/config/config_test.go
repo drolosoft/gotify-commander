@@ -1,9 +1,12 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -274,8 +277,9 @@ func TestCommandsPerMinute(t *testing.T) {
 		})
 	}
 
-	if DefaultRateLimitPerMinute != 10 {
-		t.Errorf("DefaultRateLimitPerMinute = %d, want 10", DefaultRateLimitPerMinute)
+	// The release spec asks for 20 commands a minute from messages.
+	if DefaultRateLimitPerMinute != 20 {
+		t.Errorf("DefaultRateLimitPerMinute = %d, want 20", DefaultRateLimitPerMinute)
 	}
 }
 
@@ -313,7 +317,9 @@ func TestReplayWindow(t *testing.T) {
 }
 
 func TestValidateCategoryCommands(t *testing.T) {
-	known := []string{"free", "df", "help", "locate"}
+	// The default require_confirm lists reboot, shutdown and stop, and it is
+	// checked here too, so they are known.
+	known := []string{"free", "df", "help", "locate", "reboot", "shutdown", "stop"}
 
 	cfg := DefaultConfig()
 	cfg.Categories = []Category{
@@ -400,5 +406,121 @@ func TestBuildAliasMap(t *testing.T) {
 	// Total entries: 3 service names + 5 aliases = 8
 	if len(aliasMap) != 8 {
 		t.Errorf("expected 8 entries in alias map, got %d", len(aliasMap))
+	}
+}
+
+// TestRequireConfirm checks the three ways to write require_confirm: left
+// out, the default applies; an explicit empty list turns the confirmation
+// off; a list replaces the default.
+func TestRequireConfirm(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{name: "missing means the default", yaml: "defaults:\n  timeout: 10s\n", want: []string{"reboot", "shutdown", "stop"}},
+		{name: "null means the default", yaml: "require_confirm:\n", want: []string{"reboot", "shutdown", "stop"}},
+		{name: "an empty list turns it off", yaml: "require_confirm: []\n", want: []string{}},
+		{name: "a list replaces the default", yaml: "require_confirm: [reboot, logs]\n", want: []string{"reboot", "logs"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseYAML([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("ParseYAML: %v", err)
+			}
+
+			if got := cfg.ConfirmCommands(); !slices.Equal(got, tt.want) {
+				t.Errorf("ConfirmCommands() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// A configuration built in code without DefaultConfig still confirms.
+	bare := &Config{}
+	if got := bare.ConfirmCommands(); !slices.Equal(got, DefaultRequireConfirm()) {
+		t.Errorf("ConfirmCommands() of a bare Config = %q, want the default", got)
+	}
+}
+
+// TestRequireConfirmSurvivesARoundTrip: Gotify stores the configuration by
+// marshalling what it parsed, so the default and an explicit empty list
+// must both read back the same after a save.
+func TestRequireConfirmSurvivesARoundTrip(t *testing.T) {
+	for _, document := range []string{"defaults:\n  timeout: 10s\n", "require_confirm: []\n"} {
+		first, err := ParseYAML([]byte(document))
+		if err != nil {
+			t.Fatalf("ParseYAML(%q): %v", document, err)
+		}
+
+		saved, err := yaml.Marshal(first)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+
+		second, err := ParseYAML(saved)
+		if err != nil {
+			t.Fatalf("ParseYAML(saved): %v", err)
+		}
+
+		if !slices.Equal(first.ConfirmCommands(), second.ConfirmCommands()) {
+			t.Errorf("%q: require_confirm %q became %q after a save", document, first.ConfirmCommands(), second.ConfirmCommands())
+		}
+	}
+}
+
+func TestEnabledCommandsParse(t *testing.T) {
+	cfg, err := ParseYAML([]byte("enabled_commands: [ping, uptime]\n"))
+	if err != nil {
+		t.Fatalf("ParseYAML: %v", err)
+	}
+
+	if !slices.Equal(cfg.EnabledCommands, []string{"ping", "uptime"}) {
+		t.Errorf("EnabledCommands = %q, want ping and uptime", cfg.EnabledCommands)
+	}
+
+	// Absent means every command is enabled, so there is no default list.
+	if DefaultConfig().EnabledCommands != nil {
+		t.Errorf("default EnabledCommands = %q, want nil", DefaultConfig().EnabledCommands)
+	}
+}
+
+func TestValidateCommandLists(t *testing.T) {
+	known := []string{"ping", "uptime", "reboot", "shutdown", "stop", "logs"}
+
+	cfg := DefaultConfig()
+	cfg.EnabledCommands = []string{"ping", "reboot"}
+	cfg.RequireConfirm = []string{"reboot", "logs"}
+	if err := ValidateCommandLists(cfg, known); err != nil {
+		t.Errorf("known commands: unexpected error %v", err)
+	}
+
+	// Both lists are checked, and the error names the key and the culprit.
+	cases := []struct {
+		key    string
+		mutate func(*Config)
+	}{
+		{key: "enabled_commands", mutate: func(c *Config) { c.EnabledCommands = []string{"ping", "rebot"} }},
+		{key: "require_confirm", mutate: func(c *Config) { c.RequireConfirm = []string{"rebot"} }},
+	}
+
+	for _, tc := range cases {
+		cfg := DefaultConfig()
+		tc.mutate(cfg)
+
+		err := ValidateCommandLists(cfg, known)
+		if err == nil {
+			t.Errorf("%s with rebot: expected an error", tc.key)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), `"rebot"`) {
+			t.Errorf("error %q does not name %s and the command", err, tc.key)
+		}
+
+		// The existing call site in the plugin checks the lists too.
+		if ValidateCategoryCommands(cfg, known) == nil {
+			t.Errorf("ValidateCategoryCommands with a bad %s: expected an error", tc.key)
+		}
 	}
 }
