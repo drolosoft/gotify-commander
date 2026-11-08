@@ -1,5 +1,7 @@
 package command
 
+import "slices"
+
 // Handler is a function that handles a Command and returns a Response.
 type Handler func(cmd Command) Response
 
@@ -22,4 +24,16 @@ func (r *Registry) Register(action Action, handler Handler) {
 func (r *Registry) Lookup(action Action) (Handler, bool) {
 	h, ok := r.handlers[action]
 	return h, ok
+}
+
+// Names returns the registered actions as strings, sorted, so a
+// configuration can be checked against what the registry really handles.
+func (r *Registry) Names() []string {
+	names := make([]string, 0, len(r.handlers))
+	for action := range r.handlers {
+		names = append(names, string(action))
+	}
+
+	slices.Sort(names)
+	return names
 }

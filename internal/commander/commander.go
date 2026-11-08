@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,7 @@ func New(cfg *config.Config, exec executor.Executor, sender Sender) *Commander {
 	// Auto-wire SSH executor for Mac Mini if the target is configured.
 	if macTarget, ok := cfg.SSHTargets["mac"]; ok {
 		sshExec := executor.NewSSHExecutor(macTarget)
+		sshExec.KnownHostsFile = macTarget.KnownHostsFile
 		c.sshExec = sshExec
 		builtins.SetSSHExecutor(sshExec)
 	}
@@ -114,14 +116,14 @@ func (c *Commander) Handle(ctx context.Context, input string) {
 			return
 		}
 
-		log.Printf("[commander] panic running %q: %v\n%s", input, recovered, debug.Stack())
+		log.Printf("[commander] panic running %q: %v\n%s", commandWord(input), recovered, debug.Stack())
 		resp := internalErrorResponse(input)
 		c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
 	}()
 
 	resp, executed := c.run(ctx, input)
 	if !executed && ctx.Err() != nil {
-		log.Printf("[commander] dropped %q: %v", input, ctx.Err())
+		log.Printf("[commander] dropped %q: %v", commandWord(input), ctx.Err())
 		return
 	}
 
@@ -145,7 +147,7 @@ func (c *Commander) Execute(input string) (resp command.Response) {
 			return
 		}
 
-		log.Printf("[commander] panic running %q: %v\n%s", input, recovered, debug.Stack())
+		log.Printf("[commander] panic running %q: %v\n%s", commandWord(input), recovered, debug.Stack())
 		resp = internalErrorResponse(input)
 	}()
 
@@ -197,8 +199,9 @@ func (c *Commander) run(ctx context.Context, input string) (resp command.Respons
 		return rejection("⏹ Cancelled", fmt.Sprintf("Command %q was cancelled: %s", input, err.Error()), 5), false
 	}
 
-	// 5. Log.
-	log.Printf("[commander] action=%s target=%q raw=%q", cmd.Action, cmd.Target, cmd.Raw)
+	// 5. Log the action and target only. The raw input can carry private
+	// arguments, such as the coordinates of locate.
+	log.Printf("[commander] action=%s target=%q", cmd.Action, cmd.Target)
 
 	// 6. Execute.
 	resp = handler(cmd)
@@ -251,6 +254,33 @@ func rejection(title, message string, priority int) command.Response {
 func internalErrorResponse(input string) command.Response {
 	message := fmt.Sprintf("⚠️ internal error while running %q. The details are in the Gotify log.", input)
 	return rejection(internalErrorTitle, message, internalErrorPriority)
+}
+
+// maxLoggedWord bounds the word commandWord returns, so a long line of
+// garbage sent to the command app does not end up whole in the log.
+const maxLoggedWord = 32
+
+// commandWord returns the first word of input for a log line. The rest is
+// left out: arguments can be private (locate carries the user's position),
+// and once the input is parsed run logs the action and target on their own.
+func commandWord(input string) string {
+	fields := strings.Fields(input)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	word := []rune(fields[0])
+	if len(word) > maxLoggedWord {
+		word = word[:maxLoggedWord]
+	}
+	return string(word)
+}
+
+// CommandNames returns the names of the built-in commands, the ones a
+// configuration may list in categories[].commands.
+func CommandNames() []string {
+	registry, _ := buildRegistry(config.DefaultConfig(), nil)
+	return registry.Names()
 }
 
 // buildRegistry creates a fresh Builtins+Registry pair with all 23 commands
