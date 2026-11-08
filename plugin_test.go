@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,9 +18,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	plugin "github.com/gotify/plugin-api"
 
 	"github.com/drolosoft/gotify-commander/internal/config"
+	"github.com/drolosoft/gotify-commander/internal/stream"
 )
 
 // TestMain silences the plugin's log lines so test output stays readable.
@@ -108,6 +111,24 @@ func (r *recordingMessages) waitForMessage(t *testing.T) plugin.Message {
 	return r.messages[len(r.messages)-1]
 }
 
+// waitForTitle waits for a message whose title contains want and returns it,
+// failing on any message whose title contains one of refused on the way.
+func (r *recordingMessages) waitForTitle(t *testing.T, want string, refused ...string) plugin.Message {
+	t.Helper()
+
+	for {
+		message := r.waitForMessage(t)
+		for _, title := range refused {
+			if strings.Contains(message.Title, title) {
+				t.Fatalf("unexpected message %q: %s", message.Title, message.Message)
+			}
+		}
+		if strings.Contains(message.Title, want) {
+			return message
+		}
+	}
+}
+
 // lockedBuffer is a bytes.Buffer safe to share with goroutines that log
 // while the test reads it.
 type lockedBuffer struct {
@@ -147,7 +168,7 @@ func newTestPanel(t *testing.T, cfg *config.Config, storage plugin.StorageHandle
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Name: "admin"}).(*Plugin)
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Name: "admin", Admin: true}).(*Plugin)
 	messages := newRecordingMessages()
 	instance.SetMessageHandler(messages)
 	instance.SetStorageHandler(storage)
@@ -281,7 +302,7 @@ func TestAuthFailsClosedWithoutPassword(t *testing.T) {
 
 	// A plugin that was never enabled has no password yet. An empty Bearer
 	// must not match the empty password.
-	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1}).(*Plugin)
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
 	engine := gin.New()
 	instance.RegisterWebhook(panelBase, engine.Group(panelBase))
 
@@ -771,5 +792,259 @@ func TestCommandUICleanups(t *testing.T) {
 	}
 	if !strings.Contains(commandUI, "<dialog") {
 		t.Errorf("commandUI has no password dialog")
+	}
+}
+
+// ─── Administrators only ─────────────────────────────────────────────────────
+
+func TestNonAdminGetsDisabledPlugin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 2, Name: "guest", Admin: false})
+
+	if _, ok := instance.(*Plugin); ok {
+		t.Fatal("a non-admin user got the full plugin")
+	}
+
+	// Gotify only calls the optional interfaces a plugin implements. Without
+	// Webhooker there is no panel, without Configurer no settings to fill.
+	if _, ok := instance.(plugin.Webhooker); ok {
+		t.Error("non-admin instance implements Webhooker")
+	}
+	if _, ok := instance.(plugin.Configurer); ok {
+		t.Error("non-admin instance implements Configurer")
+	}
+	if _, ok := instance.(plugin.Messenger); ok {
+		t.Error("non-admin instance implements Messenger")
+	}
+
+	// Mount it the way Gotify would and check that nothing is served.
+	engine := gin.New()
+	if webhooker, ok := instance.(plugin.Webhooker); ok {
+		webhooker.RegisterWebhook(panelBase, engine.Group(panelBase))
+	}
+	if routes := engine.Routes(); len(routes) != 0 {
+		t.Errorf("non-admin instance mounted %d routes: %v", len(routes), routes)
+	}
+
+	displayer, ok := instance.(plugin.Displayer)
+	if !ok {
+		t.Fatal("non-admin instance has no plugin page")
+	}
+	if display := displayer.GetDisplay(nil); !strings.Contains(display, "Only Gotify administrators can use gotify-commander") {
+		t.Errorf("display does not say who may use the plugin:\n%s", display)
+	}
+
+	// Enabling fails with the reason, which Gotify shows next to the switch.
+	err := instance.Enable()
+	if err == nil || !strings.Contains(err.Error(), "administrators") {
+		t.Errorf("Enable() = %v, want an error about administrators", err)
+	}
+	if err := instance.Disable(); err != nil {
+		t.Errorf("Disable() = %v, want nil", err)
+	}
+}
+
+func TestAdminGetsFullPlugin(t *testing.T) {
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Name: "admin", Admin: true})
+
+	if _, ok := instance.(*Plugin); !ok {
+		t.Fatalf("an admin got %T, want *Plugin", instance)
+	}
+	if _, ok := instance.(plugin.Webhooker); !ok {
+		t.Error("admin instance does not implement Webhooker")
+	}
+}
+
+// ─── Stream listener lifecycle ───────────────────────────────────────────────
+
+// stoppingListener is a streamListener whose Stop runs stop, standing in for
+// the in-flight command a real Stop waits for.
+type stoppingListener struct {
+	stop func()
+}
+
+// Start does nothing: the fake has no connection.
+func (l *stoppingListener) Start() {}
+
+// Stop runs the in-flight work and returns when it is done.
+func (l *stoppingListener) Stop() { l.stop() }
+
+func TestDisableDoesNotHoldLockWhileStopping(t *testing.T) {
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	messages := newRecordingMessages()
+	instance.SetMessageHandler(messages)
+	instance.SetStorageHandler(&memoryStorage{})
+	instance.cfg = configWithPasswordAndServer(testPassword)
+
+	// stream.Listener.Stop waits for the running command, and the command
+	// ends by sending its reply through Plugin.Send, which takes p.mu. The
+	// fake does the same thing synchronously.
+	instance.newListener = func(_ *config.Config, handler stream.Handler) streamListener {
+		return &stoppingListener{stop: func() {
+			handler.Handle(context.Background(), "ping")
+		}}
+	}
+
+	if err := instance.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	messages.waitForTitle(t, "Commander Online")
+
+	disabled := make(chan error, 1)
+	go func() { disabled <- instance.Disable() }()
+
+	select {
+	case err := <-disabled:
+		if err != nil {
+			t.Fatalf("Disable: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Disable deadlocked: it holds p.mu while the listener waits for a Send")
+	}
+
+	messages.waitForTitle(t, "Ping")
+}
+
+// fakeStream is a websocket endpoint shaped like Gotify's /stream. Every
+// accepted connection is handed to the test with its client token.
+type fakeStream struct {
+	server      *httptest.Server
+	connections chan *streamConnection
+}
+
+// streamConnection is one client connected to the fake stream.
+type streamConnection struct {
+	token  string
+	conn   *websocket.Conn
+	closed chan struct{}
+}
+
+// newFakeStream starts a fake Gotify stream closed when the test ends.
+func newFakeStream(t *testing.T) *fakeStream {
+	t.Helper()
+
+	fake := &fakeStream{connections: make(chan *streamConnection, 8)}
+	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
+	t.Cleanup(fake.server.Close)
+
+	return fake
+}
+
+// serve upgrades the request and reads until the client goes away. Reading
+// is what makes gorilla answer the client's pings.
+func (fake *fakeStream) serve(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	connection := &streamConnection{
+		token:  r.Header.Get("X-Gotify-Key"),
+		conn:   conn,
+		closed: make(chan struct{}),
+	}
+	fake.connections <- connection
+	defer close(connection.closed)
+
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+// next waits for the next client to connect.
+func (fake *fakeStream) next(t *testing.T) *streamConnection {
+	t.Helper()
+
+	select {
+	case connection := <-fake.connections:
+		return connection
+	case <-time.After(3 * time.Second):
+		t.Fatal("no client connected to the fake stream")
+		return nil
+	}
+}
+
+// push sends a message from appID down the connection, as Gotify does when
+// a client posts to that application.
+func (connection *streamConnection) push(t *testing.T, appID int, text string) {
+	t.Helper()
+
+	message := stream.GotifyMessage{ID: 1, AppID: appID, Message: text}
+	if err := connection.conn.WriteJSON(message); err != nil {
+		t.Fatalf("push %q: %v", text, err)
+	}
+}
+
+func TestConfigChangeRestartsListener(t *testing.T) {
+	fake := newFakeStream(t)
+
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	messages := newRecordingMessages()
+	instance.SetMessageHandler(messages)
+	instance.SetStorageHandler(&memoryStorage{})
+
+	first := configWithPasswordAndServer(testPassword)
+	first.Gotify.ServerURL = fake.server.URL
+	first.Gotify.ClientToken = "token-one"
+	first.Gotify.CommandAppID = 1
+	if err := instance.ValidateAndSetConfig(first); err != nil {
+		t.Fatalf("first config: %v", err)
+	}
+	if err := instance.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	t.Cleanup(func() { instance.Disable() })
+
+	old := fake.next(t)
+	if old.token != "token-one" {
+		t.Fatalf("first connection used token %q, want token-one", old.token)
+	}
+
+	// Gotify applies a new configuration without calling Enable again.
+	second := configWithPasswordAndServer(testPassword)
+	second.Gotify.ServerURL = fake.server.URL
+	second.Gotify.ClientToken = "token-two"
+	second.Gotify.CommandAppID = 7
+	if err := instance.ValidateAndSetConfig(second); err != nil {
+		t.Fatalf("second config: %v", err)
+	}
+
+	current := fake.next(t)
+	if current.token != "token-two" {
+		t.Fatalf("connection after the change used token %q, want token-two", current.token)
+	}
+
+	// Two listeners on the same stream would run every command twice.
+	select {
+	case <-old.closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the listener of the old configuration is still connected")
+	}
+
+	// A message from the old command app is ignored, one from the new app
+	// runs. The worker keeps the order, so if the first one ran its reply
+	// would come before the pong.
+	current.push(t, 1, "services")
+	current.push(t, 7, "ping")
+	messages.waitForTitle(t, "Ping", "Services")
+}
+
+func TestConfigWithUnknownCommandIsRefused(t *testing.T) {
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+
+	cfg := configWithPasswordAndServer(testPassword)
+	cfg.Categories = []config.Category{{Label: "Machine", Type: "machine", Commands: []string{"free", "dff"}}}
+
+	err := instance.ValidateAndSetConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), `"dff"`) {
+		t.Errorf("ValidateAndSetConfig = %v, want an error naming dff", err)
+	}
+	if instance.cfg != nil {
+		t.Errorf("a refused configuration was applied")
 	}
 }
