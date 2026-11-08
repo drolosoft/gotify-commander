@@ -46,6 +46,26 @@ type GotifyConfig struct {
 type Defaults struct {
 	Timeout  time.Duration `yaml:"timeout"`
 	LogLines int           `yaml:"log_lines"`
+
+	// RateLimitPerMinute is how many commands sent as Gotify messages run
+	// in any minute. 0 means DefaultRateLimitPerMinute; read it through
+	// CommandsPerMinute. The control panel has its own limit.
+	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
+}
+
+// DefaultRateLimitPerMinute is the message limit when rate_limit_per_minute
+// is not set. It matches the panel's 10 per minute: enough for a person
+// tapping commands on a phone, not enough for a script with a stolen client
+// token to queue a flood of them.
+const DefaultRateLimitPerMinute = 10
+
+// CommandsPerMinute returns the message rate limit, with 0 replaced by
+// DefaultRateLimitPerMinute.
+func (d Defaults) CommandsPerMinute() int {
+	if d.RateLimitPerMinute == 0 {
+		return DefaultRateLimitPerMinute
+	}
+	return d.RateLimitPerMinute
 }
 
 // SSHTarget defines how to connect to a remote machine via SSH.
@@ -108,6 +128,12 @@ func Validate(cfg *Config) error {
 	// message, so the plugin would listen and never run anything.
 	if cfg.Gotify.CommandAppID <= 0 {
 		return fmt.Errorf("gotify.command_app_id must be an application ID greater than 0, got %d", cfg.Gotify.CommandAppID)
+	}
+
+	// A negative limit would refuse every command; 0 is the way to ask for
+	// the default, so anything below it is a typo worth reporting.
+	if cfg.Defaults.RateLimitPerMinute < 0 {
+		return fmt.Errorf("defaults.rate_limit_per_minute must be 0 (the default, %d) or more, got %d", DefaultRateLimitPerMinute, cfg.Defaults.RateLimitPerMinute)
 	}
 
 	// Service validation.
