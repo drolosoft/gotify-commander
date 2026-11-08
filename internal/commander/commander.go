@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/drolosoft/gotify-commander/internal/command"
 	"github.com/drolosoft/gotify-commander/internal/config"
 	"github.com/drolosoft/gotify-commander/internal/executor"
+	"github.com/drolosoft/gotify-commander/internal/ratelimit"
 	"github.com/drolosoft/gotify-commander/internal/security"
 )
 
@@ -31,6 +33,16 @@ type Commander struct {
 	aliases   map[string]string
 	services  map[string]bool
 	whitelist *security.Whitelist
+
+	// messageLimiter counts the commands that arrive as Gotify messages,
+	// through Handle. The panel's POST /execute has its own limiter in front
+	// of Execute, so the two paths have separate budgets.
+	messageLimiter *ratelimit.Limiter
+
+	// dangerous holds the actions that can take a machine down, and
+	// dangerSlot lets only one of them run at a time, from either path.
+	dangerous  map[command.Action]bool
+	dangerSlot sync.Mutex
 
 	mu           sync.RWMutex
 	commandCount int
@@ -61,6 +73,9 @@ func New(cfg *config.Config, exec executor.Executor, sender Sender) *Commander {
 		services:  services,
 		whitelist: security.NewWhitelist(services),
 		startTime: time.Now(),
+
+		messageLimiter: ratelimit.New(cfg.Defaults.CommandsPerMinute(), time.Minute),
+		dangerous:      dangerousActions(cfg),
 	}
 
 	// Auto-wire SSH executor for Mac Mini if the target is configured.
@@ -98,6 +113,22 @@ const (
 	internalErrorPriority = 8
 )
 
+// rateLimitedTitle and rateLimitedPriority mark the reply to a message that
+// came over the limit. The priority matches Busy: the command was not run,
+// nothing is wrong with the server.
+const (
+	rateLimitedTitle    = "⏳ Rate limited"
+	rateLimitedPriority = 5
+)
+
+// dangerBusyTitle, dangerBusyMessage and dangerBusyPriority mark the refusal
+// of a dangerous command while another one is still running.
+const (
+	dangerBusyTitle    = "⚠️ Busy"
+	dangerBusyMessage  = "⚠️ Another dangerous command is still running"
+	dangerBusyPriority = 7
+)
+
 // HandleCommand is the primary entry point. It parses the raw input, enforces
 // security, dispatches to the appropriate handler, and delivers the response.
 func (c *Commander) HandleCommand(input string) {
@@ -105,10 +136,12 @@ func (c *Commander) HandleCommand(input string) {
 }
 
 // Handle is HandleCommand with a context, and with Busy it lets the stream
-// listener hand commands to the Commander directly. A command whose context
-// is already cancelled (the plugin is being disabled) is dropped without a
-// reply. A panic in a command is recovered, logged with its stack and
-// answered with an internal error.
+// listener hand commands to the Commander directly. Messages are rate
+// limited (defaults.rate_limit_per_minute, 10 by default): one over the
+// limit is answered with how long to wait and is not run. A command whose
+// context is already cancelled (the plugin is being disabled) is dropped
+// without a reply. A panic in a command is recovered, logged with its stack
+// and answered with an internal error.
 func (c *Commander) Handle(ctx context.Context, input string) {
 	defer func() {
 		recovered := recover()
@@ -121,6 +154,15 @@ func (c *Commander) Handle(ctx context.Context, input string) {
 		c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
 	}()
 
+	// Any client token of the user can post to the command app and fill
+	// the listener's queue, so messages are counted before anything is
+	// parsed or run.
+	allowed, retryAfter := c.messageLimiter.Allow()
+	if !allowed {
+		c.refuseRateLimited(ctx, input, retryAfter)
+		return
+	}
+
 	resp, executed := c.run(ctx, input)
 	if !executed && ctx.Err() != nil {
 		log.Printf("[commander] dropped %q: %v", commandWord(input), ctx.Err())
@@ -128,6 +170,22 @@ func (c *Commander) Handle(ctx context.Context, input string) {
 	}
 
 	c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
+}
+
+// refuseRateLimited answers a message that came over the limit with the
+// whole seconds until a new one fits. Like any other refusal, it is dropped
+// without a reply when the plugin is being disabled.
+func (c *Commander) refuseRateLimited(ctx context.Context, input string, retryAfter time.Duration) {
+	if err := ctx.Err(); err != nil {
+		log.Printf("[commander] dropped %q: %v", commandWord(input), err)
+		return
+	}
+
+	log.Printf("[commander] rate limited %q", commandWord(input))
+
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	message := fmt.Sprintf("⏳ Too many commands, try again in %d s", seconds)
+	c.sender.Send(rateLimitedTitle, message, rateLimitedPriority, false)
 }
 
 // Busy tells the user that input was refused because too many commands are
@@ -164,8 +222,9 @@ func (c *Commander) Execute(input string) (resp command.Response) {
 }
 
 // run is the path HandleCommand and Execute share: parse, security checks,
-// handler lookup, execution and stats. executed reports whether a command
-// handler ran; when it is false, resp is the rejection to show the user.
+// handler lookup, the one-at-a-time rule for dangerous commands, execution
+// and stats. executed reports whether a command handler ran; when it is
+// false, resp is the rejection to show the user.
 // The context is checked before the handler starts; the builtins do not
 // take a context yet, so a command already running is not interrupted.
 func (c *Commander) run(ctx context.Context, input string) (resp command.Response, executed bool) {
@@ -199,14 +258,25 @@ func (c *Commander) run(ctx context.Context, input string) (resp command.Respons
 		return rejection("⏹ Cancelled", fmt.Sprintf("Command %q was cancelled: %s", input, err.Error()), 5), false
 	}
 
-	// 5. Log the action and target only. The raw input can carry private
+	// 5. Only one command that can take a machine down runs at a time. A
+	// second reboot sent while the first is still waiting for the host is
+	// refused instead of queued behind it. The deferred unlock also runs
+	// when the handler panics.
+	if c.dangerous[cmd.Action] {
+		if !c.dangerSlot.TryLock() {
+			return rejection(dangerBusyTitle, dangerBusyMessage, dangerBusyPriority), false
+		}
+		defer c.dangerSlot.Unlock()
+	}
+
+	// 6. Log the action and target only. The raw input can carry private
 	// arguments, such as the coordinates of locate.
 	log.Printf("[commander] action=%s target=%q", cmd.Action, cmd.Target)
 
-	// 6. Execute.
+	// 7. Execute.
 	resp = handler(cmd)
 
-	// 7. Update stats.
+	// 8. Update stats.
 	c.mu.Lock()
 	c.commandCount++
 	c.lastCommand = string(cmd.Action)
@@ -312,6 +382,28 @@ func commandWord(input string) string {
 		word = word[:maxLoggedWord]
 	}
 	return string(word)
+}
+
+// dangerousActions returns reboot and shutdown, which are always dangerous,
+// plus every command listed in a category with danger: true. The panel asks
+// for confirmation before those; here they share the danger slot.
+func dangerousActions(cfg *config.Config) map[command.Action]bool {
+	dangerous := map[command.Action]bool{
+		command.ActionReboot:   true,
+		command.ActionShutdown: true,
+	}
+
+	for _, category := range cfg.Categories {
+		if !category.Danger {
+			continue
+		}
+
+		for _, name := range category.Commands {
+			dangerous[command.Action(name)] = true
+		}
+	}
+
+	return dangerous
 }
 
 // CommandNames returns the names of the built-in commands, the ones a
