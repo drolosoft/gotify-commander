@@ -1060,3 +1060,30 @@ func TestVersionComesFromBuild(t *testing.T) {
 		t.Errorf("command.Version = %q, want %q (User-Agent of locate)", command.Version, version)
 	}
 }
+
+// ─── Example configuration ───────────────────────────────────────────────────
+
+func TestExampleConfigIsValid(t *testing.T) {
+	data, err := os.ReadFile("config.example.yaml")
+	if err != nil {
+		t.Fatalf("read config.example.yaml: %v", err)
+	}
+
+	cfg, err := config.ParseYAML(data)
+	if err != nil {
+		t.Fatalf("parse config.example.yaml: %v", err)
+	}
+
+	// The instance is not enabled, so this only validates and stores it.
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	if err := instance.ValidateAndSetConfig(cfg); err != nil {
+		t.Errorf("config.example.yaml is refused: %v", err)
+	}
+
+	if cfg.Gotify.ResponseAppToken != "" {
+		t.Errorf("the example still fills the deprecated response_app_token")
+	}
+	if cfg.SSHTargets["mac"].KnownHostsFile == "" {
+		t.Errorf("the example does not show known_hosts_file")
+	}
+}

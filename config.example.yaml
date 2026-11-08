@@ -1,12 +1,19 @@
 # gotify-commander configuration
 # Edit in Gotify WebUI → Plugins → gotify-commander → Configure
+# Only a Gotify administrator can enable and configure the plugin.
 
 gotify:
+  # URL the plugin uses to reach Gotify's stream, usually the local port.
   server_url: "http://localhost:2006"
-  base_url: "https://gotify.example.com"     # public URL of your Gotify server
-  client_token: "your-gotify-client-token"    # Clients → Create → copy token
-  command_app_id: 1                           # plugin's own app ID (shown in Plugins page)
-  response_app_token: "your-response-token"
+  # Public URL of your Gotify server, as you open it from your phone.
+  base_url: "https://gotify.example.com"
+  # Client token the plugin listens with (Clients → Create → copy token).
+  client_token: "your-gotify-client-token"
+  # ID of the application you send commands to (shown in Apps); must be > 0.
+  command_app_id: 1
+  # Deprecated and optional: not used, replies go out through the plugin.
+  # Leave it empty or remove it; old configurations that set it still load.
+  response_app_token: ""
 
 # Password for the web control panel (sent as "Authorization: Bearer ...").
 # Empty = a random password is generated, stored by the plugin and shown on
@@ -15,22 +22,40 @@ gotify:
 web_password: ""
 
 defaults:
+  # How long a command may run before it is stopped.
   timeout: 30s
+  # How many lines "logs <service>" shows.
   log_lines: 30
 
-# SSH targets for remote machines (optional)
+# SSH targets for remote machines (optional). Only "mac" is used today: it
+# runs the commands of services with machine: mac and the "mac" target.
 ssh_targets:
   mac:
-    host: "192.168.1.100"       # Tailscale IP recommended
+    # Address of the machine; a Tailscale IP is recommended.
+    host: "192.168.1.100"
+    # SSH port; 22 when left out.
     port: 22
+    # User the commands run as on that machine.
     user: "admin"
+    # Private key of the user that runs Gotify, used to log in.
     key_file: "/home/admin/.ssh/id_rsa"
+    # known_hosts file the host key is checked against. Optional: empty
+    # means ~/.ssh/known_hosts of the user that runs Gotify. Set it
+    # explicitly when Gotify runs as a service or in Docker, where that user
+    # often has no such file even though the key lives in /home/admin/.ssh.
+    known_hosts_file: "/home/admin/.ssh/known_hosts"
+    # The host key is verified, so the Mac must be in that file before the
+    # first command. Add it as the user that runs Gotify:
+    #   ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts
+    # (or >> the known_hosts_file above), then check the fingerprint.
 
-# Categories — define tabs in the web UI control panel
-# type controls what happens when you tap a command button:
+# Categories — define tabs in the web UI control panel.
+# Every name in commands must be a built-in command, or the configuration is
+# refused. type controls what happens when you tap a command button:
 #   machine  → shows VPS/Mac target buttons
 #   service  → shows service list with favicons
 #   direct   → runs immediately (no submenu)
+# danger: true asks for confirmation before running.
 categories:
   - label: "🖥️ Machine"
     type: machine
@@ -52,15 +77,21 @@ categories:
     type: direct
     commands: [help]
 
-# Services you want to manage
-# Each service needs: machine + systemd (for VPS) or launchd (for Mac)
-# Optional: description, domain (for favicons), port, aliases
+# Services you want to manage. Only services listed here can be started,
+# stopped or restarted.
+#   description  text shown in the panel and in "services"
+#   machine      vps (needs systemd) or mac (needs launchd)
+#   port         port the service listens on, shown in "services"
+#   domain       optional; enables the favicon and "traffic <service>"
+#   aliases      optional short names you can type instead of the name
+#   systemd      unit name on the VPS
+#   launchd      label on the Mac
 services:
   nginx:
     description: "Web Server"
     machine: vps
     port: 80
-    domain: "example.com"         # enables favicon in web UI
+    domain: "example.com"
     aliases: [ng, web]
     systemd: nginx
 
@@ -84,3 +115,24 @@ services:
     port: 8080
     aliases: [home]
     launchd: com.homeserver.service
+
+# ─── sudoers (not part of the plugin configuration) ──────────────────────────
+# Some commands run with sudo as the user that runs Gotify. A minimal rule,
+# for /etc/sudoers.d/gotify-commander (edit with: visudo -f <file>). Replace
+# "gotify" with that user, list one line per unit in services, and check the
+# paths with "command -v <binary>" on your server.
+#
+# Cmnd_Alias GC_UNITS   = /usr/bin/systemctl start nginx, \
+#                         /usr/bin/systemctl stop nginx, \
+#                         /usr/bin/systemctl restart nginx, \
+#                         /usr/bin/journalctl -u nginx -n * --no-pager
+# Cmnd_Alias GC_POWER   = /usr/sbin/reboot "", /usr/sbin/shutdown -h now
+# Cmnd_Alias GC_CERTS   = /usr/bin/find /etc/letsencrypt/live -name cert.pem, \
+#                         /usr/bin/openssl x509 -enddate -noout -in /etc/letsencrypt/live/*/cert.pem
+# Cmnd_Alias GC_TRAFFIC = /usr/bin/zcat -f /var/log/nginx/access.log*, \
+#                         /usr/local/bin/rhit /var/log/nginx/ *, \
+#                         /usr/local/bin/rhit /tmp/rhit-*.log *, \
+#                         /usr/bin/goaccess /var/log/nginx/access.log *
+# gotify ALL=(root) NOPASSWD: GC_UNITS, GC_POWER, GC_CERTS, GC_TRAFFIC
+#
+# systemctl status needs no sudo: the plugin uses "systemctl is-active".
