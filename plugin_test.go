@@ -455,3 +455,181 @@ func configWithPasswordAndServer(password string) *config.Config {
 	cfg.Gotify.ResponseAppToken = "response-token"
 	return cfg
 }
+
+// ─── POST /execute ───────────────────────────────────────────────────────────
+
+func TestExecuteFromThePanel(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	response := panel.serve(executeRequestFor("ping", testPassword))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ping from the panel: got %d, want 200 (%s)", response.Code, response.Body)
+	}
+	if !strings.Contains(response.Body.String(), "pong") {
+		t.Errorf("ping answered %s, want pong", response.Body)
+	}
+
+	// Older browsers send no Sec-Fetch-Site; a matching Origin is enough.
+	request := executeRequestFor("ping", testPassword)
+	request.Header.Del("Sec-Fetch-Site")
+	if code := panel.serve(request).Code; code != http.StatusOK {
+		t.Errorf("same Origin without Sec-Fetch-Site: got %d, want 200", code)
+	}
+
+	// A charset parameter is still JSON.
+	request = executeRequestFor("ping", testPassword)
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	if code := panel.serve(request).Code; code != http.StatusOK {
+		t.Errorf("application/json with charset: got %d, want 200", code)
+	}
+}
+
+func TestExecuteRejectsWrongContentType(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	for _, contentType := range []string{"text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", ""} {
+		request := executeRequestFor("ping", testPassword)
+		request.Header.Set("Content-Type", contentType)
+		if code := panel.serve(request).Code; code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q: got %d, want 415", contentType, code)
+		}
+	}
+}
+
+func TestExecuteRejectsOversizedBody(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	// Valid JSON that is far too big, so the limit and not the parser is
+	// what stops it.
+	huge := `{"command":"` + strings.Repeat("a", 1<<20) + `"}`
+	request := executeRequestFor("ping", testPassword)
+	request.Body = io.NopCloser(strings.NewReader(huge))
+	request.ContentLength = int64(len(huge))
+	if code := panel.serve(request).Code; code != http.StatusRequestEntityTooLarge {
+		t.Errorf("1 MiB JSON body: got %d, want 413", code)
+	}
+
+	// Garbage of the same size is also refused by the limit.
+	request = executeRequestFor("ping", testPassword)
+	request.Body = io.NopCloser(bytes.NewReader(make([]byte, 1<<20)))
+	if code := panel.serve(request).Code; code != http.StatusRequestEntityTooLarge {
+		t.Errorf("1 MiB of zeros: got %d, want 413", code)
+	}
+}
+
+func TestExecuteRejectsCrossOrigin(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	cases := map[string]map[string]string{
+		"foreign Origin": {"Origin": "https://evil.example", "Sec-Fetch-Site": ""},
+		"foreign Origin, same-origin fetch metadata": {"Origin": "https://evil.example"},
+		"cross-site fetch metadata":                  {"Sec-Fetch-Site": "cross-site", "Origin": ""},
+		"null Origin":                                {"Origin": "null", "Sec-Fetch-Site": ""},
+		"http Origin on an https request": {
+			"Origin": "http://example.com", "X-Forwarded-Proto": "https", "Sec-Fetch-Site": "",
+		},
+	}
+	for name, headers := range cases {
+		request := executeRequestFor("ping", testPassword)
+		for header, value := range headers {
+			if value == "" {
+				request.Header.Del(header)
+			} else {
+				request.Header.Set(header, value)
+			}
+		}
+		if code := panel.serve(request).Code; code != http.StatusForbidden {
+			t.Errorf("%s: got %d, want 403", name, code)
+		}
+	}
+
+	// TLS ended at the proxy without X-Forwarded-Proto: an https Origin for
+	// the same host is still the panel itself.
+	request := executeRequestFor("ping", testPassword)
+	request.Header.Set("Origin", "https://example.com")
+	if code := panel.serve(request).Code; code != http.StatusOK {
+		t.Errorf("https Origin behind a TLS proxy: got %d, want 200", code)
+	}
+}
+
+func TestExecuteNeedsAuthBeforeAnythingElse(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	request := executeRequestFor("ping", "wrong")
+	request.Header.Set("Content-Type", "text/plain")
+	if code := panel.serve(request).Code; code != http.StatusUnauthorized {
+		t.Errorf("wrong password and wrong type: got %d, want 401", code)
+	}
+}
+
+func TestExecuteRateLimit(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	for attempt := 1; attempt <= executeRateLimit; attempt++ {
+		if code := panel.serve(executeRequestFor("ping", testPassword)).Code; code != http.StatusOK {
+			t.Fatalf("execution %d of %d: got %d, want 200", attempt, executeRateLimit, code)
+		}
+	}
+
+	response := panel.serve(executeRequestFor("ping", testPassword))
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("execution %d: got %d, want 429", executeRateLimit+1, response.Code)
+	}
+	if response.Header().Get("Retry-After") == "" {
+		t.Errorf("429 without Retry-After")
+	}
+}
+
+func TestExecuteConcurrencyLimit(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	// Two executions in flight hold every slot.
+	for range cap(panel.plugin.executeSlots) {
+		panel.plugin.executeSlots <- struct{}{}
+	}
+
+	response := panel.serve(executeRequestFor("ping", testPassword))
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("third concurrent execution: got %d, want 429", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "busy") {
+		t.Errorf("busy response says %s, want busy", response.Body)
+	}
+
+	// A busy answer must not spend the minute's budget.
+	<-panel.plugin.executeSlots
+	if code := panel.serve(executeRequestFor("ping", testPassword)).Code; code != http.StatusOK {
+		t.Errorf("after a slot frees up: got %d, want 200", code)
+	}
+}
+
+func TestRateLimiterWindow(t *testing.T) {
+	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	limiter := newRateLimiter(2, time.Minute)
+	limiter.now = func() time.Time { return now }
+
+	if allowed, _ := limiter.Allow(); !allowed {
+		t.Fatal("first call refused")
+	}
+	now = now.Add(20 * time.Second)
+	if allowed, _ := limiter.Allow(); !allowed {
+		t.Fatal("second call refused")
+	}
+
+	allowed, retryAfter := limiter.Allow()
+	if allowed {
+		t.Fatal("third call within the minute allowed")
+	}
+	if retryAfter != 40*time.Second {
+		t.Errorf("retry after %s, want 40s (when the first call leaves the window)", retryAfter)
+	}
+
+	// Once the first call is a minute old, one more fits.
+	now = now.Add(40 * time.Second)
+	if allowed, _ := limiter.Allow(); !allowed {
+		t.Error("call refused after the oldest one left the window")
+	}
+	if allowed, _ := limiter.Allow(); allowed {
+		t.Error("window holds more calls than the limit")
+	}
+}

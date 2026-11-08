@@ -6,10 +6,15 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +59,12 @@ type Plugin struct {
 	// while web_password is empty. It is shown on the plugin page and kept
 	// in the plugin storage so it survives restarts.
 	panelPassword string
+
+	// executeSlots is a semaphore for POST /execute and executeLimiter its
+	// rate limit. Commands run real programs on the host, so the panel
+	// must not be able to start an unbounded number of them.
+	executeSlots   chan struct{}
+	executeLimiter *rateLimiter
 }
 
 // pluginState is what the plugin keeps in its Gotify storage blob. It is JSON
@@ -66,9 +77,24 @@ type pluginState struct {
 // 24 bytes are 192 bits, far beyond any online guessing.
 const panelPasswordBytes = 24
 
+// Limits for POST /execute. A command line is a few words, so 64 KiB is
+// generous. Two executions at once and ten a minute are more than a person
+// tapping buttons on a phone needs, and they stop a script from turning the
+// panel into a fork bomb against the server.
+const (
+	maxExecuteBody       = 64 << 10
+	maxConcurrentExecute = 2
+	executeRateLimit     = 10
+	executeRateWindow    = time.Minute
+)
+
 // NewGotifyPluginInstance is the factory function called by Gotify when loading the plugin.
 func NewGotifyPluginInstance(ctx plugin.UserContext) plugin.Plugin {
-	return &Plugin{userCtx: ctx}
+	return &Plugin{
+		userCtx:        ctx,
+		executeSlots:   make(chan struct{}, maxConcurrentExecute),
+		executeLimiter: newRateLimiter(executeRateLimit, executeRateWindow),
+	}
 }
 
 // ─── commander.Sender implementation ─────────────────────────────────────────
@@ -487,35 +513,138 @@ func (p *Plugin) RegisterWebhook(basePath string, g *gin.RouterGroup) {
 	})
 
 	// POST /execute — run a command directly via the webhook
-	api.POST("/execute", func(c *gin.Context) {
-		p.mu.Lock()
-		enabled := p.enabled
-		cmdr := p.cmdr
-		p.mu.Unlock()
+	api.POST("/execute", p.handleExecute)
+}
 
-		if !enabled || cmdr == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin not enabled"})
+// handleExecute runs one command for POST /execute. The checks go from the
+// cheapest to the most expensive, and nothing runs until the request is known
+// to come from the panel page with a body of the right shape and size.
+func (p *Plugin) handleExecute(c *gin.Context) {
+	if !sameOriginRequest(c.Request) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "cross-origin request refused"})
+		return
+	}
+
+	if !isJSONRequest(c.Request) {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "Content-Type must be application/json"})
+		return
+	}
+
+	// The whole body is read under the limit before parsing, so an oversized
+	// body is a 413 whatever it contains, not a parse error halfway through.
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxExecuteBody))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
 			return
 		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "could not read the request body"})
+		return
+	}
 
-		var req executeRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid JSON: %s", err.Error())})
-			return
-		}
+	var req executeRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid JSON: %s", err.Error())})
+		return
+	}
 
-		if req.Command == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "command is required"})
-			return
-		}
+	if req.Command == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "command is required"})
+		return
+	}
 
-		resp := cmdr.Execute(req.Command)
+	p.mu.Lock()
+	enabled := p.enabled
+	cmdr := p.cmdr
+	p.mu.Unlock()
 
-		c.JSON(http.StatusOK, gin.H{
-			"title":   resp.Title,
-			"message": resp.Message,
-		})
+	if !enabled || cmdr == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin not enabled"})
+		return
+	}
+
+	// Take a slot before the rate limit, so a request turned away because
+	// the server is busy does not spend the minute's budget.
+	select {
+	case p.executeSlots <- struct{}{}:
+		defer func() { <-p.executeSlots }()
+	default:
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "busy: another command is still running, try again in a moment"})
+		return
+	}
+
+	allowed, retryAfter := p.executeLimiter.Allow()
+	if !allowed {
+		seconds := int(math.Ceil(retryAfter.Seconds()))
+		c.Header("Retry-After", strconv.Itoa(seconds))
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": fmt.Sprintf("too many commands, try again in %d s", seconds)})
+		return
+	}
+
+	resp := cmdr.Execute(req.Command)
+
+	c.JSON(http.StatusOK, gin.H{
+		"title":   resp.Title,
+		"message": resp.Message,
 	})
+}
+
+// isJSONRequest reports whether the request body is declared as JSON. Only
+// JSON is accepted because a cross-site HTML form can send text/plain or a
+// form encoding without a CORS preflight, but never application/json.
+func isJSONRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/json"
+}
+
+// sameOriginRequest reports whether a state-changing request comes from the
+// panel's own page. Both browser signals are checked when present:
+//
+//   - Sec-Fetch-Site must be same-origin, same-site or none.
+//   - Origin must name the host the request was sent to.
+//
+// The Origin scheme is compared only when the request is known to be HTTPS
+// (TLS here, or X-Forwarded-Proto from the proxy): then an http Origin is
+// refused. When TLS ends at a proxy that sends no X-Forwarded-Proto, the
+// request looks like plain HTTP while the page is HTTPS, so an https Origin
+// for the same host is accepted. The header could be forged, but only by a
+// client that is not a browser, and such a client can forge Origin too:
+// these checks stop other web pages, the Bearer password stops the rest.
+func sameOriginRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "same-site", "none":
+	default:
+		return false
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(parsed.Host, r.Host) {
+		return false
+	}
+
+	switch parsed.Scheme {
+	case "https":
+		return true
+	case "http":
+		return !isHTTPSRequest(r)
+	default:
+		return false
+	}
+}
+
+// isHTTPSRequest reports whether the client reached the server over HTTPS,
+// directly or through a proxy that says so.
+func isHTTPSRequest(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 // ─── Displayer interface ──────────────────────────────────────────────────────
