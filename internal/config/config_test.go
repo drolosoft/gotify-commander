@@ -279,6 +279,39 @@ func TestCommandsPerMinute(t *testing.T) {
 	}
 }
 
+// TestReplayWindow checks the default and that an explicit 0s is kept: it is
+// how an administrator turns the replay of pending messages off, so it must
+// not be replaced by the default the way rate_limit_per_minute's 0 is. YAML
+// durations need a unit, as timeout does: a bare 0 does not parse.
+func TestReplayWindow(t *testing.T) {
+	tests := []struct {
+		name   string
+		yaml   string
+		window time.Duration
+	}{
+		{name: "missing means the default", yaml: "defaults:\n  timeout: 10s\n", window: DefaultReplayWindow},
+		{name: "zero turns the replay off", yaml: "defaults:\n  replay_window: 0s\n", window: 0},
+		{name: "a duration is used as is", yaml: "defaults:\n  replay_window: 90s\n", window: 90 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := ParseYAML([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("ParseYAML: %v", err)
+			}
+
+			if got := cfg.Defaults.ReplayWindow; got != tt.window {
+				t.Errorf("ReplayWindow = %v, want %v", got, tt.window)
+			}
+		})
+	}
+
+	if DefaultReplayWindow != 5*time.Minute {
+		t.Errorf("DefaultReplayWindow = %v, want 5m", DefaultReplayWindow)
+	}
+}
+
 func TestValidateCategoryCommands(t *testing.T) {
 	known := []string{"free", "df", "help", "locate"}
 

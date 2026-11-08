@@ -51,7 +51,20 @@ type Defaults struct {
 	// in any minute. 0 means DefaultRateLimitPerMinute; read it through
 	// CommandsPerMinute. The control panel has its own limit.
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
+
+	// ReplayWindow is how old a command posted while the plugin was not
+	// connected (a Gotify restart, a dropped stream) may be and still run
+	// when the plugin connects again. Older ones are answered as expired
+	// and not run. 0s turns the replay off: only commands that arrive on the
+	// open stream run, as before. Like timeout, it needs a unit in YAML.
+	ReplayWindow time.Duration `yaml:"replay_window"`
 }
+
+// DefaultReplayWindow is the replay window of a configuration that does not
+// set replay_window. Five minutes covers a Gotify restart and the reconnect
+// backoff with room to spare; a "reboot" typed an hour ago is no longer what
+// the user wants.
+const DefaultReplayWindow = 5 * time.Minute
 
 // DefaultRateLimitPerMinute is the message limit when rate_limit_per_minute
 // is not set. It matches the panel's 10 per minute: enough for a person
@@ -96,8 +109,9 @@ type Service struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Defaults: Defaults{
-			Timeout:  30 * time.Second,
-			LogLines: 30,
+			Timeout:      30 * time.Second,
+			LogLines:     30,
+			ReplayWindow: DefaultReplayWindow,
 		},
 		SSHTargets: make(map[string]SSHTarget),
 		Services:   make(map[string]Service),
@@ -134,6 +148,12 @@ func Validate(cfg *Config) error {
 	// the default, so anything below it is a typo worth reporting.
 	if cfg.Defaults.RateLimitPerMinute < 0 {
 		return fmt.Errorf("defaults.rate_limit_per_minute must be 0 (the default, %d) or more, got %d", DefaultRateLimitPerMinute, cfg.Defaults.RateLimitPerMinute)
+	}
+
+	// 0 is the way to turn the replay off, so a negative window can only be
+	// a typo.
+	if cfg.Defaults.ReplayWindow < 0 {
+		return fmt.Errorf("defaults.replay_window must be 0 (no replay) or a positive duration, got %s", cfg.Defaults.ReplayWindow)
 	}
 
 	// Service validation.

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -870,7 +871,7 @@ func TestDisableDoesNotHoldLockWhileStopping(t *testing.T) {
 	// stream.Listener.Stop waits for the running command, and the command
 	// ends by sending its reply through Plugin.Send, which takes p.mu. The
 	// fake does the same thing synchronously.
-	instance.newListener = func(_ *config.Config, handler stream.Handler) streamListener {
+	instance.newListener = func(_ *config.Config, handler stream.Handler, _ stream.Checkpoint) streamListener {
 		return &stoppingListener{stop: func() {
 			handler.Handle(context.Background(), "ping")
 		}}
@@ -897,14 +898,27 @@ func TestDisableDoesNotHoldLockWhileStopping(t *testing.T) {
 }
 
 // fakeStream is a websocket endpoint shaped like Gotify's /stream. Every
-// accepted connection is handed to the test with its client token.
+// accepted connection is handed to the test with its client token. Like
+// Gotify, it stores every message it pushes and lists the stored messages of
+// an application on GET /application/{id}/message.
 type fakeStream struct {
 	server      *httptest.Server
 	connections chan *streamConnection
+
+	// fetches is signalled after each answer to the message list, so a test
+	// can push only once the listener has read the history.
+	fetches chan struct{}
+
+	// mu guards lastID and history, which the tests write while the
+	// listener reads them.
+	mu      sync.Mutex
+	lastID  int
+	history []stream.GotifyMessage
 }
 
 // streamConnection is one client connected to the fake stream.
 type streamConnection struct {
+	fake   *fakeStream
 	token  string
 	conn   *websocket.Conn
 	closed chan struct{}
@@ -914,11 +928,49 @@ type streamConnection struct {
 func newFakeStream(t *testing.T) *fakeStream {
 	t.Helper()
 
-	fake := &fakeStream{connections: make(chan *streamConnection, 8)}
-	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
+	fake := &fakeStream{
+		connections: make(chan *streamConnection, 8),
+		fetches:     make(chan struct{}, 8),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", fake.serve)
+	mux.HandleFunc("GET /application/{id}/message", fake.serveHistory)
+	fake.server = httptest.NewServer(mux)
 	t.Cleanup(fake.server.Close)
 
 	return fake
+}
+
+// post stores a message from appID posted age ago without pushing it, as
+// Gotify does with a message that arrives while the plugin is not connected.
+func (fake *fakeStream) post(appID int, text string, age time.Duration) stream.GotifyMessage {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	fake.lastID++
+	message := stream.GotifyMessage{ID: fake.lastID, AppID: appID, Message: text, Date: time.Now().Add(-age)}
+	fake.history = append(fake.history, message)
+
+	return message
+}
+
+// serveHistory lists the stored messages of the application in the path,
+// newest first, then signals fetches.
+func (fake *fakeStream) serveHistory(w http.ResponseWriter, r *http.Request) {
+	fake.mu.Lock()
+	var messages []stream.GotifyMessage
+	for index := len(fake.history) - 1; index >= 0; index-- {
+		if strconv.Itoa(fake.history[index].AppID) == r.PathValue("id") {
+			messages = append(messages, fake.history[index])
+		}
+	}
+	fake.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": messages, "paging": map[string]any{"size": len(messages)}})
+
+	fake.fetches <- struct{}{}
 }
 
 // serve upgrades the request and reads until the client goes away. Reading
@@ -932,6 +984,7 @@ func (fake *fakeStream) serve(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	connection := &streamConnection{
+		fake:   fake,
 		token:  r.Header.Get("X-Gotify-Key"),
 		conn:   conn,
 		closed: make(chan struct{}),
@@ -946,25 +999,34 @@ func (fake *fakeStream) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// next waits for the next client to connect.
+// next waits for the next client to connect and to read the history. A
+// message pushed before that read would be in the history of a first run,
+// which the listener skips on purpose.
 func (fake *fakeStream) next(t *testing.T) *streamConnection {
 	t.Helper()
 
+	var connection *streamConnection
 	select {
-	case connection := <-fake.connections:
-		return connection
+	case connection = <-fake.connections:
 	case <-time.After(3 * time.Second):
 		t.Fatal("no client connected to the fake stream")
-		return nil
 	}
+
+	select {
+	case <-fake.fetches:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client did not read the history")
+	}
+
+	return connection
 }
 
-// push sends a message from appID down the connection, as Gotify does when
-// a client posts to that application.
+// push stores a message from appID and sends it down the connection, as
+// Gotify does when a client posts to that application.
 func (connection *streamConnection) push(t *testing.T, appID int, text string) {
 	t.Helper()
 
-	message := stream.GotifyMessage{ID: 1, AppID: appID, Message: text}
+	message := connection.fake.post(appID, text, 0)
 	if err := connection.conn.WriteJSON(message); err != nil {
 		t.Fatalf("push %q: %v", text, err)
 	}
@@ -1039,10 +1101,19 @@ func fakeStreamConfig(fake *fakeStream, token string) *config.Config {
 func enableOnFakeStream(t *testing.T, fake *fakeStream) (*Plugin, *recordingMessages, *streamConnection) {
 	t.Helper()
 
+	return enableOnFakeStreamWith(t, fake, &memoryStorage{})
+}
+
+// enableOnFakeStreamWith is enableOnFakeStream over storage, so a test can
+// start a second plugin on the same storage, the way Gotify does after a
+// restart.
+func enableOnFakeStreamWith(t *testing.T, fake *fakeStream, storage plugin.StorageHandler) (*Plugin, *recordingMessages, *streamConnection) {
+	t.Helper()
+
 	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
 	messages := newRecordingMessages()
 	instance.SetMessageHandler(messages)
-	instance.SetStorageHandler(&memoryStorage{})
+	instance.SetStorageHandler(storage)
 
 	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-one")); err != nil {
 		t.Fatalf("first config: %v", err)
@@ -1210,4 +1281,200 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if cfg.SSHTargets["mac"].KnownHostsFile == "" {
 		t.Errorf("the example does not show known_hosts_file")
 	}
+}
+
+// ─── Commands posted while the plugin was away ───────────────────────────────
+
+// The listener only tells a handler about expired commands when it has
+// Expired, so the relay it is given must have it.
+var _ stream.ExpiryHandler = (*commandRelay)(nil)
+
+// enableWithStorage enables a plugin on fake over storage without sending
+// anything, and returns it with its messages.
+func enableWithStorage(t *testing.T, fake *fakeStream, storage plugin.StorageHandler) (*Plugin, *recordingMessages) {
+	t.Helper()
+
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	messages := newRecordingMessages()
+	instance.SetMessageHandler(messages)
+	instance.SetStorageHandler(storage)
+
+	if err := instance.ValidateAndSetConfig(fakeStreamConfig(fake, "token-one")); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if err := instance.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	t.Cleanup(func() { instance.Disable() })
+
+	return instance, messages
+}
+
+// storedState reads the plugin storage blob back.
+func storedState(t *testing.T, storage plugin.StorageHandler) pluginState {
+	t.Helper()
+
+	blob, err := storage.Load()
+	if err != nil {
+		t.Fatalf("storage.Load: %v", err)
+	}
+
+	var state pluginState
+	if err := json.Unmarshal(blob, &state); err != nil {
+		t.Fatalf("storage blob is not JSON: %v (%q)", err, blob)
+	}
+	return state
+}
+
+// waitForCheckpoint waits for the listener, which saves from its own
+// goroutine, to store want as the last message ID.
+func waitForCheckpoint(t *testing.T, storage plugin.StorageHandler, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		blob, _ := storage.Load()
+		var state pluginState
+		if json.Unmarshal(blob, &state) == nil && state.Stream != nil && state.Stream.LastMessageID == want {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("checkpoint is not %d after 3s, blob %q", want, blob)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestCommandPostedDuringRestartRuns is the bug of 2026-11-08 end to end: a
+// ping posted while Gotify restarts is answered by the plugin that comes
+// back, with nothing sent again.
+func TestCommandPostedDuringRestartRuns(t *testing.T) {
+	fake := newFakeStream(t)
+	storage := &memoryStorage{}
+
+	before, _, _ := enableOnFakeStreamWith(t, fake, storage)
+	if got := storedState(t, storage).Stream; got == nil || got.LastMessageID != 1 {
+		t.Fatalf("checkpoint after the first ping = %+v, want message 1", got)
+	}
+	before.Disable()
+
+	fake.post(1, "ping", 2*time.Second)
+
+	_, messages := enableWithStorage(t, fake, storage)
+	messages.waitForTitle(t, "Ping")
+
+	if got := storedState(t, storage).Stream.LastMessageID; got != 2 {
+		t.Errorf("checkpoint after the replay = %d, want 2", got)
+	}
+}
+
+// TestExpiredCommandIsAnswered: a command older than the replay window is
+// not run, and the user is told which one.
+func TestExpiredCommandIsAnswered(t *testing.T) {
+	fake := newFakeStream(t)
+	storage := &memoryStorage{}
+
+	before, _, _ := enableOnFakeStreamWith(t, fake, storage)
+	before.Disable()
+
+	fake.post(1, "uptime now", 10*time.Minute)
+
+	_, messages := enableWithStorage(t, fake, storage)
+	expired := messages.waitForTitle(t, "expired", "Uptime")
+
+	if !strings.Contains(expired.Message, "⌛ Command expired, not executed: uptime") {
+		t.Errorf("expired message = %q, want the command word", expired.Message)
+	}
+	if strings.Contains(expired.Message, "now") {
+		t.Errorf("expired message %q repeats the arguments", expired.Message)
+	}
+}
+
+// TestFirstEnableDoesNotRunHistory: a plugin enabled for the first time
+// finds an old reboot in the command app and must not run it.
+func TestFirstEnableDoesNotRunHistory(t *testing.T) {
+	fake := newFakeStream(t)
+	fake.post(1, "uptime", time.Second)
+	storage := &memoryStorage{}
+
+	_, messages := enableWithStorage(t, fake, storage)
+	connection := fake.next(t)
+	waitForCheckpoint(t, storage, 1)
+
+	connection.push(t, 1, "ping")
+	messages.waitForTitle(t, "Ping", "Uptime")
+}
+
+// TestCheckpointKeepsThePanelPassword: the checkpoint shares the storage
+// blob with the generated password, and saving one must keep the other.
+func TestCheckpointKeepsThePanelPassword(t *testing.T) {
+	storage := &memoryStorage{}
+	panel := newTestPanel(t, config.DefaultConfig(), storage)
+	password := storedPassword(t, storage)
+
+	checkpoint := panel.plugin.streamCheckpoint(configWithPasswordAndServer(""))
+	if err := checkpoint.Save(42); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	state := storedState(t, storage)
+	if state.PanelPassword != password {
+		t.Errorf("panel password after a checkpoint save = %q, want %q", state.PanelPassword, password)
+	}
+	if id, err := checkpoint.Load(); err != nil || id != 42 {
+		t.Errorf("Load = %d, %v; want 42", id, err)
+	}
+}
+
+// TestCheckpointOfAnotherStreamIsIgnored: message IDs belong to one Gotify
+// server, so a checkpoint saved for another server or command app is not
+// used, and an unreadable blob is never overwritten.
+func TestCheckpointOfAnotherStreamIsIgnored(t *testing.T) {
+	storage := &memoryStorage{}
+	instance := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	instance.SetStorageHandler(storage)
+
+	first := configWithPasswordAndServer(testPassword)
+	if err := instance.streamCheckpoint(first).Save(42); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	otherServer := configWithPasswordAndServer(testPassword)
+	otherServer.Gotify.ServerURL = "http://other:80"
+	otherApp := configWithPasswordAndServer(testPassword)
+	otherApp.Gotify.CommandAppID = 9
+
+	for name, cfg := range map[string]*config.Config{"server": otherServer, "app": otherApp} {
+		if id, err := instance.streamCheckpoint(cfg).Load(); err != nil || id != 0 {
+			t.Errorf("Load for another %s = %d, %v; want 0", name, id, err)
+		}
+	}
+
+	unreadable := &unreadableStorage{}
+	broken := NewGotifyPluginInstance(plugin.UserContext{ID: 1, Admin: true}).(*Plugin)
+	broken.SetStorageHandler(unreadable)
+	if err := broken.streamCheckpoint(first).Save(43); err == nil {
+		t.Error("Save over unreadable storage succeeded")
+	}
+	if unreadable.saves != 0 {
+		t.Error("Save wrote over a blob it could not read; it would have dropped the stored password")
+	}
+}
+
+// unreadableStorage fails every Load and counts the Saves that would have
+// replaced the blob nobody could read.
+type unreadableStorage struct {
+	saves int
+}
+
+// Save counts the write.
+func (s *unreadableStorage) Save([]byte) error {
+	s.saves++
+	return nil
+}
+
+// Load always fails.
+func (s *unreadableStorage) Load() ([]byte, error) {
+	return nil, errors.New("database is locked")
 }
