@@ -209,7 +209,7 @@ web_password: ""   # empty = generated, shown on the plugin page in Gotify
 defaults:
   timeout: 30s
   log_lines: 30
-  rate_limit_per_minute: 10   # commands sent as messages; 0 = 10
+  rate_limit_per_minute: 20   # commands sent as messages; 0 = 20
 
 # Categories -- tabs in the web UI
 # type: machine (VPS/Mac buttons), service (service list), direct (runs immediately)
@@ -305,7 +305,7 @@ Without a matching entry, commands to that machine fail with a host key error. T
 - Every command runs in its own process group with a timeout that kills the whole group, and its output is capped at 64 KiB.
 - SSH targets are verified against `known_hosts`. Remote commands are quoted word by word.
 - The plugin runs with the same permissions as the Gotify process plus the `sudo` rules you grant it. `config.example.yaml` ends with a minimal `sudoers` block listing the binaries the commands call.
-- Commands sent as Gotify messages are limited to 10 per minute per plugin instance (`defaults.rate_limit_per_minute`). One over the limit is not run; the reply says how many seconds to wait. The control panel has its own 10 per minute, counted apart.
+- Commands sent as Gotify messages are limited to 20 per minute per plugin instance (`defaults.rate_limit_per_minute`). One over the limit is not run; the reply says how many seconds to wait. The control panel has its own 10 per minute, counted apart.
 - `reboot`, `shutdown` and the commands of a `danger: true` category run one at a time, from messages and from the panel. A second one sent while the first is still running is refused.
 - The panel keeps the command history in the browser's `localStorage` for 24 hours. The **✕ Clear** button removes it at once.
 - Only Gotify administrators get a working plugin instance. For other users the plugin page shows a notice and nothing is started.
@@ -330,7 +330,7 @@ Without a matching entry, commands to that machine fail with a host key error. T
 | Gotify authentication | ✅ Enforced (Gotify's own auth) |
 | Web UI API authentication | ✅ Enforced (Bearer password, generated if `web_password` is empty) |
 | Web UI security headers (CSP with nonce, no framing, no-store) | ✅ Enforced |
-| Rate limiting | ✅ Web UI `/execute`: 2 at a time, 10 per minute. Messages: 10 per minute per instance. One dangerous command at a time |
+| Rate limiting | ✅ Web UI `/execute`: 2 at a time, 10 per minute. Messages: 20 per minute per instance. One dangerous command at a time |
 | Panel history in the browser | ✅ Expires after 24 hours |
 | Admin-only plugin instances | ✅ Enforced |
 | Process group timeouts and 64 KiB output cap | ✅ Enforced |
