@@ -387,8 +387,10 @@ func TestCommandNamesMatchRegistry(t *testing.T) {
 			t.Errorf("CommandNames() = %v, missing %q", names, want)
 		}
 	}
-	if len(names) != 23 {
-		t.Errorf("CommandNames() has %d names, want the 23 builtins", len(names))
+	// 23 builtins plus the 7 operations actions (failed, health, digest and
+	// the four docker forms).
+	if len(names) != 30 {
+		t.Errorf("CommandNames() has %d names, want 30", len(names))
 	}
 }
 

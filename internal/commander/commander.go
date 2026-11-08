@@ -63,7 +63,7 @@ type Commander struct {
 	startTime    time.Time
 }
 
-// New creates a Commander, wires all 23 built-in commands, and starts the
+// New creates a Commander, wires every built-in and operations command, and starts the
 // uptime clock. If cfg.SSHTargets["mac"] is configured, an SSHExecutor is
 // created automatically and wired into the builtins for Mac targets.
 func New(cfg *config.Config, exec executor.Executor, sender Sender) *Commander {
@@ -606,6 +606,12 @@ func dangerousActions(cfg *config.Config) map[command.Action]bool {
 		command.ActionShutdown: true,
 	}
 
+	// The operations commands name their own dangerous actions (restarting
+	// a container), so they are not hard-coded here twice.
+	for _, action := range command.DangerousActions() {
+		dangerous[action] = true
+	}
+
 	for _, category := range cfg.Categories {
 		if !category.Danger {
 			continue
@@ -645,12 +651,16 @@ func CommandNames() []string {
 	return registry.Names()
 }
 
-// buildRegistry creates a fresh Builtins+Registry pair with all 23 commands
+// buildRegistry creates a fresh Builtins+Registry pair with every command
 // registered. It returns both so the caller can wire SSH after the fact.
 func buildRegistry(cfg *config.Config, exec executor.Executor) (*command.Registry, *command.Builtins) {
 	b := command.NewBuiltins(cfg, exec)
 	r := command.NewRegistry()
 	registerAll(r, b)
+
+	// The operations commands (failed, health, docker, digest) live in
+	// their own file and register themselves the same way.
+	b.RegisterExtras(r)
 	return r, b
 }
 

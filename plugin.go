@@ -74,6 +74,10 @@ type Plugin struct {
 	// instead of reconnecting.
 	relay *commandRelay
 
+	// digest sends the daily health summary when the configuration enables
+	// it. It is started with the commander and stopped with it.
+	digest *command.Digest
+
 	// panelPassword is the generated control panel password, used only
 	// while web_password is empty. It is shown on the plugin page and kept
 	// in the plugin storage so it survives restarts.
@@ -599,10 +603,18 @@ func (p *Plugin) Enable() error {
 func (p *Plugin) Disable() error {
 	p.mu.Lock()
 	listener := p.listener
+	digest := p.digest
 	p.listener = nil
 	p.relay = nil
+	p.digest = nil
 	p.enabled = false
 	p.mu.Unlock()
+
+	// The digest goroutine may be sending through p.Send right now, so it is
+	// stopped outside the lock for the same reason as the listener.
+	if digest != nil {
+		digest.Stop()
+	}
 
 	// Stop waits for the command in flight, and that command ends with
 	// Send, which takes p.mu. Under the lock, Stop would wait for itself
@@ -620,6 +632,39 @@ func (p *Plugin) Disable() error {
 func (p *Plugin) startCommander(cfg *config.Config) {
 	p.cmdr = newCommander(cfg, p)
 	p.startListener(cfg)
+	p.restartDigest(cfg)
+}
+
+// restartDigest stops the running digest, if any, and starts one for cfg
+// when digest.enabled is set. A bad time or timezone is logged and leaves
+// the plugin without a digest rather than without commands. The caller must
+// hold p.mu.
+func (p *Plugin) restartDigest(cfg *config.Config) {
+	if p.digest != nil {
+		p.digest.Stop()
+		p.digest = nil
+	}
+
+	cmdr := p.cmdr
+
+	// The summary goes through Execute so it keeps the commander's panic
+	// recovery and stays outside the message rate limit.
+	summary := func() command.Response {
+		return cmdr.Execute("digest")
+	}
+
+	send := func(r command.Response) {
+		p.Send(r.Title, r.Message, r.Priority, r.Markdown)
+	}
+
+	digest, err := command.NewDigest(cfg.Digest, summary, send)
+	if err != nil {
+		log.Printf("[plugin] digest not started: %v", err)
+		return
+	}
+
+	digest.Start(context.Background())
+	p.digest = digest
 }
 
 // replaceCommander builds a commander for cfg that carries on the stats of
@@ -631,9 +676,10 @@ func (p *Plugin) replaceCommander(cfg *config.Config) {
 	// The plugin page and /health read these counters; a saved
 	// configuration is not a restart, so they go on from where they were.
 	if p.cmdr != nil {
-		cmdr.SetStats(p.cmdr.Snapshot())
+		cmdr.Inherit(p.cmdr)
 	}
 	p.cmdr = cmdr
+	p.restartDigest(cfg)
 
 	if p.relay != nil {
 		p.relay.set(cmdr)
@@ -2834,7 +2880,7 @@ function isDangerCmd(cmd) {
     }
   }
   /* Fallback: hardcoded danger commands */
-  return ["reboot", "shutdown"].indexOf(cmd) >= 0;
+  return ["reboot", "shutdown", "docker-restart"].indexOf(cmd) >= 0;
 }
 
 function showTargetPanel(panel, cmd) {

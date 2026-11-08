@@ -21,14 +21,23 @@ gotify:
 # to replace it; empty it again to go back to the generated one.
 web_password: ""
 
+# Only these commands run, from messages and from the panel; leave it out or
+# empty to allow all of them.
+# enabled_commands: [ping, status, restart, logs, health]
+
+# Commands that ask for a code before running when they arrive as a message:
+# the plugin answers "reply `confirm 4821` within 60 s". Leave the key out for
+# the default list; an explicit empty list [] turns confirmation off.
+require_confirm: [reboot, shutdown, stop]
+
 defaults:
   # How long a command may run before it is stopped.
   timeout: 30s
   # How many lines "logs <service>" shows.
   log_lines: 30
   # Commands accepted per minute from Gotify messages; refused ones get a
-  # "too many commands" reply. The web panel has its own budget of 10. 0 = 10.
-  rate_limit_per_minute: 10
+  # "too many commands" reply. The web panel has its own budget of 10. 0 = 20.
+  rate_limit_per_minute: 20
   # Commands posted while the plugin was disconnected (a Gotify restart) run
   # when it reconnects if they are younger than this. Needs a unit: 0s turns
   # the replay off, 5m is the default.
