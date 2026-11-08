@@ -7,6 +7,21 @@ All notable changes to gotify-commander. The format follows
 
 ### Added
 
+- New command `failed [vps/mac]`: the failed systemd units, or
+  "✅ No failed units". On the mac target it first asks the machine its
+  system and answers "not available on macOS" there.
+- New command `health`: one message with every mount at 85 % or more, the
+  load average against the CPU count, the memory in use, the failed units
+  and the certificates that expire within 14 days, each line marked ✅ or ⚠️.
+  It reads the certificates with the same `find` and `openssl` calls as
+  `certs`.
+- New command `docker ps|restart|logs <name>`, limited to the containers in
+  the new `docker.allowed_containers` setting and only when docker is
+  installed. `docker restart` is a dangerous command: one at a time, like
+  `reboot`.
+- New command `digest`, which sends the health summary now, and the new
+  `digest:` section (`enabled`, `at`, `timezone`) that sends it every day at
+  that local time.
 - New setting `defaults.replay_window`: how old a command posted while the
   plugin was not connected may be and still run when it connects again. 5m by
   default; `0s` turns the replay off. A negative value is refused when the

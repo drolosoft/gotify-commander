@@ -56,6 +56,26 @@ ssh_targets:
     #   ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts
     # (or >> the known_hosts_file above), then check the fingerprint.
 
+# Containers the "docker ps|restart|logs <name>" command may touch. Names are
+# matched without case; any other container is refused, and an empty list
+# allows none. The user that runs Gotify needs access to the Docker socket
+# (the docker group, which is as powerful as root). "docker restart" counts as
+# dangerous: only one runs at a time.
+docker:
+  allowed_containers: []
+
+# Daily digest: the "health" summary (disks, load, memory, failed units,
+# certificates) sent as a message once a day. The "digest" command sends it
+# at any time, enabled or not.
+digest:
+  # Off by default.
+  enabled: false
+  # Local time of day, 24-hour "HH:MM".
+  at: "07:30"
+  # IANA timezone such as "Europe/Madrid". Empty = the timezone of the host
+  # that runs Gotify, which in a container is often UTC.
+  timezone: ""
+
 # Categories — define tabs in the web UI control panel.
 # Every name in commands must be a built-in command, or the configuration is
 # refused. type controls what happens when you tap a command button:
