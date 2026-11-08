@@ -55,6 +55,8 @@ ssh_targets:
     # first command. Add it as the user that runs Gotify:
     #   ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts
     # (or >> the known_hosts_file above), then check the fingerprint.
+    # Operating system of the machine: linux (the default) or darwin for a Mac.
+    os: darwin
 
 # Categories — define tabs in the web UI control panel.
 # Every name in commands must be a built-in command, or the configuration is
