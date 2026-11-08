@@ -92,6 +92,13 @@ type SSHTarget struct {
 	// against. Empty means ~/.ssh/known_hosts of the user running Gotify,
 	// which a service or a container user often does not have.
 	KnownHostsFile string `yaml:"known_hosts_file"`
+
+	// OS is the operating system of the machine, "linux" or "darwin". It
+	// picks the commands that free, top, ip, ports, connections, updates
+	// and logs run there, because macOS has none of free, ss, apt or
+	// journalctl. Empty means "linux", the commands every target ran
+	// before this field existed.
+	OS string `yaml:"os"`
 }
 
 // Service represents a single managed service.
@@ -178,6 +185,10 @@ func Validate(cfg *Config) error {
 			target.Port = 22
 			cfg.SSHTargets[name] = target
 		}
+	}
+
+	if err := validateTargetOS(cfg); err != nil {
+		return err
 	}
 
 	return nil
