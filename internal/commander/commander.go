@@ -1,8 +1,10 @@
 package commander
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -87,25 +89,97 @@ func (c *Commander) SetSSHExecutor(exec executor.Executor) {
 	c.mu.Unlock()
 }
 
+// internalErrorTitle and internalErrorPriority mark the reply sent when a
+// command panics, so the user knows the command did not just go missing.
+const (
+	internalErrorTitle    = "⚠️ Internal Error"
+	internalErrorPriority = 8
+)
+
 // HandleCommand is the primary entry point. It parses the raw input, enforces
 // security, dispatches to the appropriate handler, and delivers the response.
 func (c *Commander) HandleCommand(input string) {
+	c.Handle(context.Background(), input)
+}
+
+// Handle is HandleCommand with a context, and with Busy it lets the stream
+// listener hand commands to the Commander directly. A command whose context
+// is already cancelled (the plugin is being disabled) is dropped without a
+// reply. A panic in a command is recovered, logged with its stack and
+// answered with an internal error.
+func (c *Commander) Handle(ctx context.Context, input string) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+
+		log.Printf("[commander] panic running %q: %v\n%s", input, recovered, debug.Stack())
+		resp := internalErrorResponse(input)
+		c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
+	}()
+
+	resp, executed := c.run(ctx, input)
+	if !executed && ctx.Err() != nil {
+		log.Printf("[commander] dropped %q: %v", input, ctx.Err())
+		return
+	}
+
+	c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
+}
+
+// Busy tells the user that input was refused because too many commands are
+// waiting. The stream listener calls it from its read loop, so it only sends.
+func (c *Commander) Busy(input string) {
+	message := fmt.Sprintf("Too many commands are waiting; %q was not run. Try again in a moment.", input)
+	c.sender.Send("⏳ Busy", message, 5, false)
+}
+
+// Execute runs a command and returns the response synchronously.
+// Also sends the response via Gotify notification. Rejections (parse,
+// whitelist, unknown command) are only returned, as before.
+func (c *Commander) Execute(input string) (resp command.Response) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+
+		log.Printf("[commander] panic running %q: %v\n%s", input, recovered, debug.Stack())
+		resp = internalErrorResponse(input)
+	}()
+
+	resp, executed := c.run(context.Background(), input)
+	if !executed {
+		return resp
+	}
+
+	// The caller is an HTTP handler waiting for this response; the Gotify
+	// copy goes out in the background so a slow Send does not delay it.
+	go c.sendDetached(resp)
+
+	return resp
+}
+
+// run is the path HandleCommand and Execute share: parse, security checks,
+// handler lookup, execution and stats. executed reports whether a command
+// handler ran; when it is false, resp is the rejection to show the user.
+// The context is checked before the handler starts; the builtins do not
+// take a context yet, so a command already running is not interrupted.
+func (c *Commander) run(ctx context.Context, input string) (resp command.Response, executed bool) {
 	// 1. Parse.
 	cmd, err := command.Parse(input, c.aliases, c.services)
 	if err != nil {
-		c.sender.Send("❌ Parse Error", fmt.Sprintf("Could not parse command: %s", err.Error()), 7, false)
-		return
+		return rejection("❌ Parse Error", fmt.Sprintf("Could not parse command: %s", err.Error()), 7), false
 	}
 
 	// 2. Security checks for non-machine targets.
 	if cmd.Target != "" && cmd.Target != "vps" && cmd.Target != "mac" {
 		if !c.whitelist.IsAllowed(cmd.Target) {
-			c.sender.Send("❌ Forbidden", fmt.Sprintf("Service %q is not allowed.", cmd.Target), 8, false)
-			return
+			return rejection("❌ Forbidden", fmt.Sprintf("Service %q is not allowed.", cmd.Target), 8), false
 		}
 		if err := security.ValidateInput(cmd.Target); err != nil {
-			c.sender.Send("❌ Invalid Input", fmt.Sprintf("Rejected: %s", err.Error()), 8, false)
-			return
+			return rejection("❌ Invalid Input", fmt.Sprintf("Rejected: %s", err.Error()), 8), false
 		}
 	}
 
@@ -115,17 +189,21 @@ func (c *Commander) HandleCommand(input string) {
 	c.mu.RUnlock()
 
 	if !ok {
-		c.sender.Send("❌ Unknown Command", fmt.Sprintf("No handler registered for action %q.", cmd.Action), 7, false)
-		return
+		return rejection("❌ Unknown Command", fmt.Sprintf("No handler registered for action %q.", cmd.Action), 7), false
 	}
 
-	// 4. Log.
+	// 4. A command queued before the plugin was disabled must not run after.
+	if err := ctx.Err(); err != nil {
+		return rejection("⏹ Cancelled", fmt.Sprintf("Command %q was cancelled: %s", input, err.Error()), 5), false
+	}
+
+	// 5. Log.
 	log.Printf("[commander] action=%s target=%q raw=%q", cmd.Action, cmd.Target, cmd.Raw)
 
-	// 5. Execute.
-	resp := handler(cmd)
+	// 6. Execute.
+	resp = handler(cmd)
 
-	// 6. Update stats.
+	// 7. Update stats.
 	c.mu.Lock()
 	c.commandCount++
 	c.lastCommand = string(cmd.Action)
@@ -135,50 +213,22 @@ func (c *Commander) HandleCommand(input string) {
 	c.lastTime = time.Now()
 	c.mu.Unlock()
 
-	// 7. Send response.
-	c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
+	return resp, true
 }
 
-// Execute runs a command and returns the response synchronously.
-// Also sends the response via Gotify notification.
-func (c *Commander) Execute(input string) command.Response {
-	cmd, err := command.Parse(input, c.aliases, c.services)
-	if err != nil {
-		return command.Response{Title: "❌ Error", Message: err.Error(), Priority: 7}
-	}
-
-	if cmd.Target != "" && cmd.Target != "vps" && cmd.Target != "mac" {
-		if !c.whitelist.IsAllowed(cmd.Target) {
-			return command.Response{Title: "❌ Forbidden", Message: fmt.Sprintf("Service %q not allowed", cmd.Target), Priority: 8}
+// sendDetached delivers resp from its own goroutine; a panic in the sender
+// is logged instead of ending the Gotify process.
+func (c *Commander) sendDetached(resp command.Response) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
 		}
-		if err := security.ValidateInput(cmd.Target); err != nil {
-			return command.Response{Title: "❌ Invalid", Message: err.Error(), Priority: 8}
-		}
-	}
 
-	c.mu.RLock()
-	handler, ok := c.registry.Lookup(cmd.Action)
-	c.mu.RUnlock()
-	if !ok {
-		return command.Response{Title: "❌ Unknown", Message: fmt.Sprintf("Unknown command: %s", cmd.Action), Priority: 7}
-	}
+		log.Printf("[commander] panic sending %q: %v\n%s", resp.Title, recovered, debug.Stack())
+	}()
 
-	log.Printf("[commander] action=%s target=%q raw=%q", cmd.Action, cmd.Target, cmd.Raw)
-	resp := handler(cmd)
-
-	c.mu.Lock()
-	c.commandCount++
-	c.lastCommand = string(cmd.Action)
-	if cmd.Target != "" {
-		c.lastCommand += " " + cmd.Target
-	}
-	c.lastTime = time.Now()
-	c.mu.Unlock()
-
-	// Also send via Gotify notification
-	go c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
-
-	return resp
+	c.sender.Send(resp.Title, resp.Message, resp.Priority, resp.Markdown)
 }
 
 // Stats returns thread-safe counters and timing info.
@@ -189,6 +239,19 @@ func (c *Commander) Stats() (count int, last string, lastTime time.Time, uptime 
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// rejection builds the response for an input that was not run.
+func rejection(title, message string, priority int) command.Response {
+	return command.Response{Title: title, Message: message, Priority: priority}
+}
+
+// internalErrorResponse is the reply for a command that panicked. The panic
+// value stays in the log: it may name paths or internals the user should
+// not see in a notification.
+func internalErrorResponse(input string) command.Response {
+	message := fmt.Sprintf("⚠️ internal error while running %q. The details are in the Gotify log.", input)
+	return rejection(internalErrorTitle, message, internalErrorPriority)
+}
 
 // buildRegistry creates a fresh Builtins+Registry pair with all 23 commands
 // registered. It returns both so the caller can wire SSH after the fact.
