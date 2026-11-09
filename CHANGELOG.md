@@ -3,7 +3,11 @@
 All notable changes to gotify-commander. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-09
+
+Same build matrix as 0.4.0: Gotify 3.1.1 and 2.9.1, on amd64, arm64 and
+armv7. No configuration change is required to upgrade: the commands and the
+settings are those of 0.4.0, and what changed is the control panel.
 
 ### Changed
 
