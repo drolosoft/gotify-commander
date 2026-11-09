@@ -68,6 +68,8 @@ A Go plugin loads only when it was built with the same Go version and the same m
 
 Other Gotify versions need their own build: `scripts/pin-gotify.sh <version>` and `make build-plugin GOTIFY_VERSION=<version>` (see Building from Source). The Android app must be 2.10.1 or newer to talk to Gotify 3.
 
+Coming from Gotify 2.x or plugin 0.2.0: see [Upgrading from Gotify 2.x](doc/upgrading-from-2.x.md) for the new files, tokens, panel password and SSH host keys.
+
 ### Install on Gotify 3
 
 1. Download the file for your Gotify version and architecture from [Releases](../../releases) and check its `.sha256`.
