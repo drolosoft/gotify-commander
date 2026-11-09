@@ -3,6 +3,54 @@
 All notable changes to gotify-commander. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- The control panel is redesigned as a console. A command line suggests
+  commands, machines, services and containers while you type (`Tab`
+  completes, `Enter` runs, the up arrow recalls, `/` or `Ctrl+K` focuses
+  it). The commands of the categories sit beside the output on a wide
+  screen and in tabs on a phone. Each command of the session shows its
+  state, how long it took and its output, with buttons to copy it, run it
+  again and remove it. Output laid out in columns no longer wraps, and
+  `help` is drawn as a table instead of raw Markdown.
+- The answer of `locate` shows its map tile in the panel, with the
+  OpenStreetMap credit under it. The tile is requested with the origin of
+  your Gotify as Referer (scheme and host, never the panel's path), because
+  the tile server refuses a browser that sends none. An image from any
+  other host is shown as a link and not requested.
+- Dangerous commands ask in a dialog of the page instead of the browser's
+  `confirm()`, with Cancel focused. The panel now also asks before the
+  commands in `require_confirm`.
+- The status bar shows the plugin's uptime, the commands it has run and its
+  version, read from `/health`, next to the connection state.
+- The panel follows the system's light or dark theme until you choose one,
+  and no longer blocks zooming on a phone.
+- The page is less than half the size (137 KB instead of 298 KB): Pico CSS
+  is gone, replaced by a stylesheet written for the page, and the icons
+  embedded in it are 6 KB each instead of up to 99 KB.
+- The page's markup, stylesheet and scripts are files under `web/`, embedded
+  in the plugin, instead of one string inside `plugin.go`.
+
+### Added
+
+- A padlock in the panel's header forgets the password and asks for it
+  again.
+- A page size control in the panel's header: smaller, the percentage (which
+  goes back to 100 %) and larger, from 50 % to 125 %. The browser remembers
+  the size. The top bar keeps its own size and place at every step, so the
+  buttons stay under the pointer, and the content keeps the width of the
+  window: smaller text shows more, it does not narrow the page.
+- `GET /config` lists the commands that are enabled, with their usage, what
+  they take and whether the panel asks before running them, and the allowed
+  containers. `POST /execute` says when its answer is Markdown, and
+  `GET /health` reports the plugin version.
+- `make preview` serves the control panel on `127.0.0.1:8377` with a sample
+  configuration and canned answers, to work on it without Gotify or Docker.
+- `doc/control-panel.md`: how to use the panel, what it stores and requests,
+  its API and how to work on it.
+
 ## [0.4.0] - 2026-11-08
 
 Same build matrix as 0.3.0: Gotify 3.1.1 and 2.9.1, on amd64, arm64 and
