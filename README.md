@@ -317,6 +317,8 @@ Without a matching entry, commands to that machine fail with a host key error. T
 
 **gotify-commander executes real system commands on your server.** Treat it with the same caution as SSH access.
 
+To report a vulnerability, and for the threat model, see [SECURITY.md](SECURITY.md).
+
 ### Who Can Trigger Commands
 
 - **Anyone who can send a message to the configured Gotify app** can execute commands. This includes Gotify users with access to that application, or anyone who obtains a valid app token.
