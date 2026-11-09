@@ -1177,3 +1177,29 @@ func TestConfirmationWindowFromTheConfiguration(t *testing.T) {
 		t.Errorf("code at 10 s with window: 10s ran the reboot %d times, want 1", runs)
 	}
 }
+
+// ─── Catalogue ───────────────────────────────────────────────────────────────
+
+func TestCatalogDescribesEveryRegisteredCommand(t *testing.T) {
+	// The panel's prompt suggests commands from command.Catalog, so a
+	// command registered without an entry would run but never be offered,
+	// and an entry without a handler would be offered and then refused.
+	described := make([]string, 0, len(command.Catalog()))
+	for _, info := range command.Catalog() {
+		if info.Usage == "" || info.Summary == "" {
+			t.Errorf("catalogue entry %q has no usage or summary", info.Action)
+		}
+		if !strings.HasPrefix(info.Usage, strings.ReplaceAll(string(info.Action), "-", " ")) {
+			t.Errorf("usage %q does not start with the words of %q", info.Usage, info.Action)
+		}
+		described = append(described, string(info.Action))
+	}
+	slices.Sort(described)
+
+	registered := CommandNames()
+	slices.Sort(registered)
+
+	if !slices.Equal(described, registered) {
+		t.Errorf("catalogue and registry differ:\n catalogue: %v\n registry:  %v", described, registered)
+	}
+}

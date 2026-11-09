@@ -38,8 +38,8 @@ Phone (Gotify app)
   Gotify Server  <------------------------------+
       |                                          |
       v                                          |
-gotify-commander plugin                    Web UI (Pico CSS)
-      |                                    browser dashboard
+gotify-commander plugin                    Web UI
+      |                                    control panel
       +-- local: systemctl restart nginx   (VPS services)
       +-- SSH:   launchctl unload/load     (Mac services)
                             |
@@ -184,18 +184,23 @@ Typing just a service name (e.g. `nginx`) is treated as `status nginx`.
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/web-ui-light.png">
     <source media="(prefers-color-scheme: dark)" srcset="assets/web-ui-dark.png">
-    <img src="assets/web-ui-dark.png" alt="Web UI Control Panel showing command buttons, category tabs, and command history" width="500">
+    <img src="assets/web-ui-dark.png" alt="Control panel: the commands by category on the left, the command line on top and the session with the output of df, restart and uptime" width="820">
   </picture>
 </p>
 
-A browser dashboard built with **Pico CSS**. The link is on the plugin page in Gotify (**Plugins** -> **gotify-commander**).
+A console for your machines in the browser. The link is on the plugin page in Gotify (**Plugins** -> **gotify-commander**). It is one page with no framework and no third-party request, and it follows the light or dark theme of your system.
 
-- 🟢 Live service status grid: all services, grouped by category, color-coded
-- 🔄 One-click restart / start / stop for any service
-- 📜 Command history with timestamps and results, kept in the browser for 24 hours
-- 📊 System metrics (memory, disk, uptime) at a glance
-- 🌐 Dynamic favicons fetched from service domains
-- 📂 Dynamic categories from your YAML config: no hardcoding
+- ⌨️ A command line that suggests commands, machines, services and containers as you type. `Tab` completes, `Enter` runs, the up arrow brings back earlier commands, and `/` or `Ctrl+K` takes you there from anywhere
+- 📂 Every command of your YAML categories one click away: beside the output on a wide screen, in tabs on a phone
+- 🎯 Commands that need a machine or a service open a picker with your services grouped by machine, each with its favicon, description and port
+- 📜 A session log with the state, the duration and the output of each command. Copy the output, run it again or remove it. Tables such as `df` keep their columns, and `help` is drawn as a table
+- ⚠️ Dangerous commands, and the ones in `require_confirm`, ask in a dialog before they run
+- 🟢 A status bar with the connection, the plugin's uptime, the commands it has run and its version
+- 🔍 A page size control (50 % to 125 %) that the browser remembers
+- 🔒 A padlock that forgets the password, for a screen you share
+- 🕐 The session stays in the browser for 24 hours
+
+Its keys, what it keeps in the browser, what it requests from other hosts, its API and how to work on it are in [The control panel](doc/control-panel.md).
 
 The panel asks for a password the first time you open it in a tab. If `web_password` is empty, the plugin generates one when it is enabled, keeps it in its storage and shows it only on the plugin page in Gotify, under **Control panel password**. Set `web_password` to use your own; empty it to go back to the generated one. The browser keeps the password until the tab is closed.
 
@@ -427,6 +432,8 @@ sudo systemctl restart gotify
 ```
 
 `build-plugin` first pins `go.mod` to the server's versions (`scripts/pin-gotify.sh`), builds, and then runs `scripts/check-plugin-abi.sh`, which compares the Go version and every shared module in the `.so` against the server's `go.mod` and fails on any difference.
+
+To work on the control panel you do not need Gotify or Docker. `make preview` serves the page on `http://127.0.0.1:8377` with a sample configuration and canned answers; no command is run on your machine. The page is in `web/` (`panel.html`, `panel.css`, `panel.js`).
 
 ```bash
 make test                           # go test ./...

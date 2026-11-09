@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -508,6 +509,117 @@ func TestExecuteFromThePanel(t *testing.T) {
 	}
 }
 
+// panelCommand is one entry of "commands" in the answer of GET /config.
+type panelCommand struct {
+	Name     string `json:"name"`
+	Usage    string `json:"usage"`
+	Summary  string `json:"summary"`
+	Target   string `json:"target"`
+	Required bool   `json:"required"`
+	Confirm  bool   `json:"confirm"`
+}
+
+// panelCommands asks GET /config and returns its commands by name.
+func panelCommands(t *testing.T, panel *testPanel) map[string]panelCommand {
+	t.Helper()
+
+	response := panel.serve(get("config", testPassword))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /config: got %d, want 200 (%s)", response.Code, response.Body)
+	}
+
+	var answer struct {
+		Commands []panelCommand `json:"commands"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("GET /config is not JSON: %v", err)
+	}
+
+	byName := make(map[string]panelCommand, len(answer.Commands))
+	for _, entry := range answer.Commands {
+		byName[entry.Name] = entry
+	}
+	return byName
+}
+
+func TestConfigListsCommandsForThePrompt(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+	commands := panelCommands(t, panel)
+
+	restart, ok := commands["restart"]
+	if !ok {
+		t.Fatalf("restart is not in the commands of /config: %v", commands)
+	}
+	if restart.Usage != "restart <service>" || restart.Target != "service" || !restart.Required {
+		t.Errorf("restart is described as %+v", restart)
+	}
+	if restart.Confirm {
+		t.Errorf("restart asks for confirmation without being configured to")
+	}
+
+	// reboot is always dangerous, so the panel asks before it.
+	if !commands["reboot"].Confirm {
+		t.Errorf("reboot does not ask for confirmation")
+	}
+}
+
+func TestConfigCommandsFollowTheConfiguration(t *testing.T) {
+	cfg := configWithPassword(testPassword)
+	cfg.EnabledCommands = []string{"ping", "stop", "restart"}
+	cfg.RequireConfirm = []string{"stop"}
+	cfg.Categories = []config.Category{{Label: "Careful", Type: "service", Commands: []string{"restart"}, Danger: true}}
+
+	panel := newTestPanel(t, cfg, &memoryStorage{})
+	commands := panelCommands(t, panel)
+
+	// A disabled command would be refused, so it is not offered.
+	if _, offered := commands["reboot"]; offered {
+		t.Errorf("reboot is offered although enabled_commands leaves it out")
+	}
+	if len(commands) != 3 {
+		t.Errorf("got %d commands, want the 3 enabled ones: %v", len(commands), commands)
+	}
+
+	// require_confirm and a danger category both make the panel ask.
+	if !commands["stop"].Confirm {
+		t.Errorf("stop is in require_confirm and does not ask")
+	}
+	if !commands["restart"].Confirm {
+		t.Errorf("restart is in a danger category and does not ask")
+	}
+	if commands["ping"].Confirm {
+		t.Errorf("ping asks for confirmation")
+	}
+}
+
+func TestExecuteSaysWhenTheAnswerIsMarkdown(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	answers := map[string]bool{"help": true, "ping": false}
+	for name, wantMarkdown := range answers {
+		response := panel.serve(executeRequestFor(name, testPassword))
+
+		var answer struct {
+			Markdown *bool `json:"markdown"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+			t.Fatalf("%s: answer is not JSON: %v", name, err)
+		}
+		if answer.Markdown == nil || *answer.Markdown != wantMarkdown {
+			t.Errorf("%s: markdown is %v, want %v", name, answer.Markdown, wantMarkdown)
+		}
+	}
+}
+
+func TestHealthReportsTheVersion(t *testing.T) {
+	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
+
+	response := panel.serve(get("health", testPassword))
+	if !strings.Contains(response.Body.String(), `"version":"`+version+`"`) {
+		t.Errorf("GET /health answered %s, want the version %q", response.Body, version)
+	}
+}
+
 func TestExecuteRejectsWrongContentType(t *testing.T) {
 	panel := newTestPanel(t, configWithPassword(testPassword), &memoryStorage{})
 
@@ -629,6 +741,11 @@ func TestExecuteConcurrencyLimit(t *testing.T) {
 
 // ─── Security headers and CSP ────────────────────────────────────────────────
 
+// placeholderPattern matches a placeholder of web/panel.html, such as
+// {{nonce}} or {{touch_icon}}. Two braces alone are not one: the JSDoc of the
+// page's script writes object types as {{name: string}}.
+var placeholderPattern = regexp.MustCompile(`\{\{[a-z_]+\}\}`)
+
 // noncePattern extracts the nonce from the Content-Security-Policy header.
 var noncePattern = regexp.MustCompile(`script-src 'nonce-([A-Za-z0-9_-]+)'`)
 
@@ -681,15 +798,16 @@ func TestPageSecurityHeaders(t *testing.T) {
 	if got := strings.Count(html, `<style nonce="`+nonce+`">`); got != styles {
 		t.Errorf("%d of %d <style> tags carry the nonce", got, styles)
 	}
-	if strings.Contains(html, "{{") {
-		t.Errorf("page still has an unreplaced {{placeholder}}")
+	if found := placeholderPattern.FindString(html); found != "" {
+		t.Errorf("page still has the unreplaced placeholder %s", found)
 	}
 
-	// Pico is inlined, so the page needs no CDN.
-	if !strings.Contains(html, "Pico CSS") {
-		t.Errorf("page does not inline Pico CSS")
+	// The stylesheet and the scripts are inlined, so the page needs no CDN
+	// and no second request.
+	if !strings.Contains(html, "@layer reset, tokens") || !strings.Contains(html, "function pruneHistory") {
+		t.Errorf("page does not inline its stylesheet and its script")
 	}
-	for _, forbidden := range []string{"cdn.jsdelivr", "unpkg", "<link rel=\"stylesheet\"", "@import"} {
+	for _, forbidden := range []string{"cdn.jsdelivr", "unpkg", "<link rel=\"stylesheet\"", "@import", "<script src"} {
 		if strings.Contains(html, forbidden) {
 			t.Errorf("page references %q", forbidden)
 		}
@@ -765,6 +883,20 @@ func TestCommandUICleanups(t *testing.T) {
 	if !strings.Contains(commandUI, "<dialog") {
 		t.Errorf("commandUI has no password dialog")
 	}
+
+	// maximum-scale stops a phone from zooming just as user-scalable=no does.
+	if strings.Contains(commandUI, "maximum-scale") {
+		t.Errorf("commandUI still limits zoom with maximum-scale")
+	}
+
+	// A dangerous command is confirmed in a dialog of the page, where the
+	// safe button has the focus, not in the browser's confirm().
+	if regexp.MustCompile(`\bconfirm\(`).MatchString(commandUI) {
+		t.Errorf("commandUI still asks with the browser's confirm()")
+	}
+	if !strings.Contains(commandUI, `id="confirmDialog"`) {
+		t.Errorf("commandUI has no confirmation dialog")
+	}
 }
 
 func TestCommandUIHistoryExpires(t *testing.T) {
@@ -783,6 +915,46 @@ func TestCommandUIHistoryExpires(t *testing.T) {
 		if !strings.Contains(commandUI, want) {
 			t.Errorf("the panel help does not say %q", want)
 		}
+	}
+}
+
+// zoomStepsPattern reads the list of zoom steps from the page's script.
+var zoomStepsPattern = regexp.MustCompile(`const ZOOM_STEPS = \[([0-9, ]+)\];`)
+
+func TestCommandUIZoomStepsAgree(t *testing.T) {
+	// The zoom of the top bar is written in three files: the script steps
+	// through the list, the stylesheet has one rule per step and the boot
+	// script accepts the stored ones before the first paint. A step added to
+	// one and not to the others would be a button that does nothing.
+	match := zoomStepsPattern.FindStringSubmatch(panelJS)
+	if match == nil {
+		t.Fatal("web/panel.js has no ZOOM_STEPS list")
+	}
+
+	steps := strings.Split(match[1], ", ")
+	if len(steps) < 3 || !slices.Contains(steps, "100") {
+		t.Fatalf("ZOOM_STEPS is %v, want several steps with 100 among them", steps)
+	}
+
+	for _, step := range steps {
+		// 100 % is the browser's own size: no rule and never stored.
+		if step == "100" {
+			continue
+		}
+
+		if !strings.Contains(panelCSS, `:root[data-zoom="`+step+`"]`) {
+			t.Errorf("web/panel.css has no rule for the zoom step %s", step)
+		}
+		if !strings.Contains(panelBootJS, `"`+step+`"`) {
+			t.Errorf("web/panel-boot.js does not accept the stored zoom %s", step)
+		}
+	}
+
+	if !strings.Contains(panelBootJS, "gc_zoom") || !strings.Contains(panelJS, `"gc_zoom"`) {
+		t.Errorf("the boot script and the page script do not share the gc_zoom key")
+	}
+	if !strings.Contains(panelHTML, `id="zoomControl"`) {
+		t.Errorf("web/panel.html has no zoom control")
 	}
 }
 

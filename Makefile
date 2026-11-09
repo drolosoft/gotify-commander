@@ -34,7 +34,7 @@ DOCKER_RUN := docker run --rm --platform linux/amd64 \
 # read the .git of a worktree, whose real directory lives outside /proj.
 DOCKER_GO_BUILD := go build -buildvcs=false -a -installsuffix cgo -buildmode=plugin $(LDFLAGS)
 
-.PHONY: test lint build pin build-plugin build-all clean help
+.PHONY: test lint build pin build-plugin build-all preview clean help
 
 test:
 	go test ./... -v -count=1
@@ -77,6 +77,12 @@ build-all:
 	fi; \
 	exit $$status
 
+# The control panel only runs inside Gotify. preview serves the same page
+# from a test with a sample configuration and canned answers, so a change in
+# web/ can be seen in a browser without Docker. No command is really run.
+preview:
+	go test -tags preview -run TestPreviewPanel -timeout 0 -v .
+
 clean:
 	rm -rf $(BUILD_DIR)/ *.so
 
@@ -92,6 +98,7 @@ help:
 	@echo "  make build-plugin   Build build/*.so in gotify/build and check its ABI"
 	@echo "                      GOTIFY_VERSION=$(GOTIFY_VERSION) ARCH=$(ARCH) (amd64, arm64, arm-7)"
 	@echo "  make build-all      Every Gotify release × arch: $(GOTIFY_VERSIONS) × $(ARCHES)"
+	@echo "  make preview        Serve the control panel on 127.0.0.1:8377 with canned answers"
 	@echo "  make clean          Remove build artifacts"
 	@echo ""
 

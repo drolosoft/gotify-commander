@@ -1,0 +1,1329 @@
+/* The control panel's stylesheet. It is inlined into the page by panel.go, so
+   the page needs no second request and the CSP stays at a nonce.
+
+   Layers, lowest first. A later layer wins without raising specificity. */
+@layer reset, tokens, base, layout, components, utilities;
+
+@layer reset {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body,
+  h1,
+  h2,
+  h3,
+  p,
+  ol,
+  ul,
+  table,
+  pre {
+    margin: 0;
+  }
+
+  ol,
+  ul {
+    padding: 0;
+    list-style: none;
+  }
+
+  button,
+  input {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+}
+
+@layer tokens {
+  /* Every colour is a role with a light and a dark value. light-dark() picks
+     by color-scheme, so "system" follows the browser with no script and a
+     chosen theme only has to pin color-scheme below. The dark surfaces and
+     the three status colours are the ones of our Pulse dashboard; the accent
+     is the cyan of the gopher in the icon and the gold is its chevrons. */
+  :root {
+    color-scheme: light dark;
+
+    --bg: light-dark(#f3f5f7, #1d2835);
+    --bg-raised: light-dark(#ffffff, #26333f);
+    --bg-inset: light-dark(#e8ecf0, #161f29);
+    --border: light-dark(#d0d7de, #3a4754);
+    --border-strong: light-dark(#75828f, #6b7a89);
+    --text: light-dark(#1b2530, #dfe5ea);
+    --text-muted: light-dark(#55616d, #9aa5af);
+
+    /* The accent marks what can be clicked or is selected, nothing else. */
+    --accent: light-dark(#0a6c8c, #2cc6f0);
+    --accent-contrast: light-dark(#ffffff, #06222c);
+    --accent-tint: light-dark(rgb(10 108 140 / 0.1), rgb(44 198 240 / 0.14));
+
+    /* The gold belongs to the prompt glyph: it marks a command. */
+    --gold: light-dark(#8a6400, #f2c230);
+
+    --ok: light-dark(#11763a, #00ff87);
+    --warn: light-dark(#8a5a00, #ffaf00);
+    --danger: light-dark(#c02626, #ff6b6b);
+    --danger-contrast: light-dark(#ffffff, #2b0b0b);
+    --danger-tint: light-dark(rgb(192 38 38 / 0.08), rgb(255 107 107 / 0.12));
+
+    --shadow: light-dark(0 8px 24px rgb(27 37 48 / 0.14), 0 12px 32px rgb(0 0 0 / 0.5));
+
+    --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.5rem;
+    --space-6: 2rem;
+
+    --radius-small: 6px;
+    --radius: 10px;
+    --radius-large: 14px;
+
+    /* The two bars are sticky, and what sticks under them needs their size. */
+    --topbar-height: 3.25rem;
+    --statusbar-height: 2.25rem;
+
+    /* A finger needs 44 px; a mouse is fine with less (see "fine pointer"). */
+    --control-height: 2.75rem;
+
+    --quick: 140ms;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    :root {
+      --control-height: 2.25rem;
+    }
+  }
+
+  /* The page size of the top bar's control, as Pulse does it: <html
+     data-zoom> is the font-size of the page, and since every size here is
+     in rem the whole panel follows. 100 % has no rule. The zoom property is
+     not used: it would also scale the 1 px borders and the media queries'
+     arithmetic. Media queries keep reading the window, so the layout
+     changes at the same widths whatever the size. */
+  :root[data-zoom="50"] {
+    font-size: 50%;
+  }
+
+  :root[data-zoom="60"] {
+    font-size: 60%;
+  }
+
+  :root[data-zoom="70"] {
+    font-size: 70%;
+  }
+
+  :root[data-zoom="80"] {
+    font-size: 80%;
+  }
+
+  :root[data-zoom="90"] {
+    font-size: 90%;
+  }
+
+  :root[data-zoom="110"] {
+    font-size: 110%;
+  }
+
+  :root[data-zoom="125"] {
+    font-size: 125%;
+  }
+}
+
+@layer base {
+  html {
+    /* iOS grows the text of a rotated page by itself otherwise. */
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: calc(var(--topbar-height) + 5rem);
+  }
+
+  body {
+    min-height: 100dvh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    /* Without this the one column is as wide as its widest child wants to
+       be, and a top bar that does not fit widens the whole page. */
+    grid-template-columns: minmax(0, 1fr);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  kbd {
+    padding: 0 0.35em;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  a {
+    color: var(--accent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* The author's display rules below would otherwise beat the attribute. */
+  [hidden] {
+    display: none !important;
+  }
+}
+
+@layer layout {
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--topbar-height);
+    padding-inline: max(var(--space-3), env(safe-area-inset-left)) max(var(--space-3), env(safe-area-inset-right));
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .topbar-actions {
+    display: flex;
+    gap: var(--space-1);
+    margin-inline-start: auto;
+  }
+
+  /* One column on a phone, in reading order: prompt, commands, session. */
+  .shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: var(--space-4);
+    width: min(100% - 2 * var(--space-3), 84rem);
+    margin-inline: auto;
+    padding-block: var(--space-3) var(--space-6);
+  }
+
+  /* With room for it, the commands become a rail beside the session, so the
+     output is never pushed down by them. */
+  @media (min-width: 60rem) {
+    .shell {
+      grid-template-columns: 21rem minmax(0, 1fr);
+      grid-template-areas:
+        "deck prompt"
+        "deck log";
+      grid-template-rows: auto 1fr;
+      column-gap: var(--space-5);
+      width: min(100% - 2 * var(--space-5), 84rem);
+      /* The space above comes from the prompt and the deck themselves, so
+         it is still there when they stick under the top bar. */
+      padding-block-start: 0;
+    }
+
+    .prompt {
+      grid-area: prompt;
+    }
+
+    .log {
+      grid-area: log;
+    }
+
+    .deck {
+      grid-area: deck;
+      margin-block-start: var(--space-4);
+      position: sticky;
+      top: calc(var(--topbar-height) + var(--space-4));
+      max-height: calc(100dvh - var(--topbar-height) - var(--statusbar-height) - 2 * var(--space-4));
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
+  }
+
+  .statusbar {
+    position: sticky;
+    bottom: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    min-height: var(--statusbar-height);
+    padding: var(--space-1) max(var(--space-4), env(safe-area-inset-right)) calc(var(--space-1) + env(safe-area-inset-bottom)) max(var(--space-4), env(safe-area-inset-left));
+    background: var(--bg-raised);
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+}
+
+@layer components {
+  /* ── Small shared pieces ─────────────────────────────────────────────── */
+
+  .icon-sprite {
+    display: none;
+  }
+
+  .icon {
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* <symbol> content is styled from here: the half of the "system" icon. */
+  .icon-fill {
+    fill: currentColor;
+    stroke: none;
+  }
+
+  .micro-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+
+  /* Sized in rem, so the icon follows the page size like the name does. */
+  .brand img {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+  }
+
+  .brand-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────────────── */
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-height: var(--control-height);
+    padding: 0 var(--space-4);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-small);
+    background: var(--bg-raised);
+    font-weight: 600;
+    white-space: nowrap;
+    transition: background-color var(--quick), border-color var(--quick);
+  }
+
+  .button:hover {
+    border-color: var(--accent);
+  }
+
+  .button-primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  .button-primary:hover {
+    background: color-mix(in oklab, var(--accent), var(--text) 12%);
+  }
+
+  .button-danger-solid {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: var(--danger-contrast);
+  }
+
+  .button-quiet {
+    min-height: 2rem;
+    padding: 0 var(--space-2);
+    border-color: transparent;
+    background: none;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .button-quiet:hover {
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  .button-quiet.button-danger {
+    color: var(--danger);
+  }
+
+  .button-wide {
+    width: 100%;
+  }
+
+  .icon-button {
+    display: inline-grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    flex: none;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-small);
+    background: none;
+    color: var(--text-muted);
+    transition: background-color var(--quick), color var(--quick);
+  }
+
+  .icon-button:hover {
+    background: var(--bg-inset);
+    color: var(--text);
+  }
+
+  .icon-button-small {
+    width: 2rem;
+    height: 2rem;
+  }
+
+  /* ── The page size ───────────────────────────────────────────────────── */
+
+  .zoom-control {
+    display: flex;
+    align-items: center;
+  }
+
+  /* The three buttons are as tall as the icon buttons beside them, and
+     narrower, so they read as one control. */
+  .zoom-step {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.75rem;
+    height: 2.5rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-small);
+    background: none;
+    color: var(--text-muted);
+    transition: background-color var(--quick), color var(--quick);
+  }
+
+  .zoom-step:hover {
+    background: var(--bg-inset);
+    color: var(--text);
+  }
+
+  /* The current size, in monospace; a fixed width keeps the two signs
+     still while the number changes. */
+  .zoom-level {
+    min-width: 3.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* An end that has been reached stays focusable (aria-disabled, not
+     disabled) and only fades. */
+  .zoom-step[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .zoom-step[aria-disabled="true"]:hover {
+    background: none;
+    color: var(--text-muted);
+  }
+
+  /* ── The command line ────────────────────────────────────────────────── */
+
+  .prompt {
+    position: sticky;
+    top: var(--topbar-height);
+    z-index: 20;
+    display: flex;
+    gap: var(--space-2);
+    padding-block: var(--space-2);
+    /* The page shows through a sticky element unless it has a background.
+       The two shadows carry that background over the gutters, where the
+       session would otherwise scroll past beside the box; a shadow, unlike
+       a negative margin, never makes the page wider than the screen. */
+    background: var(--bg);
+    box-shadow: calc(-1 * var(--space-3)) 0 0 var(--bg), var(--space-3) 0 0 var(--bg);
+  }
+
+  .prompt-box {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    padding-inline: var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg-inset);
+    transition: border-color var(--quick), box-shadow var(--quick);
+  }
+
+  .prompt-box:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-tint);
+  }
+
+  .prompt-glyph,
+  .entry-glyph {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--gold);
+  }
+
+  .prompt-input {
+    flex: 1;
+    min-width: 0;
+    height: 3rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-family: var(--font-mono);
+    /* 16 px: anything smaller makes iOS zoom the page on focus. */
+    font-size: 1rem;
+  }
+
+  /* The box draws the focus ring for its input. */
+  .prompt-input:focus-visible {
+    outline: none;
+  }
+
+  .prompt-input::placeholder {
+    color: var(--text-muted);
+    font-family: var(--font-ui);
+    font-size: 0.9375rem;
+  }
+
+  .prompt-key {
+    display: none;
+  }
+
+  .prompt .button-primary {
+    min-height: 3rem;
+    border-radius: var(--radius);
+  }
+
+  .suggestions {
+    position: absolute;
+    top: 100%;
+    inset-inline: 0;
+    max-height: min(22rem, 60dvh);
+    overflow-y: auto;
+    padding: var(--space-1);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow);
+  }
+
+  .suggestion {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-small);
+    cursor: pointer;
+  }
+
+  .suggestion[aria-selected="true"] {
+    background: var(--accent-tint);
+  }
+
+  .suggestion-text {
+    font-family: var(--font-mono);
+    font-weight: 600;
+  }
+
+  .suggestion-note {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .suggestion[data-confirm] .suggestion-text {
+    color: var(--danger);
+  }
+
+  /* ── The deck ────────────────────────────────────────────────────────── */
+
+  .deck-tabs {
+    display: flex;
+    gap: var(--space-2);
+    overflow-x: auto;
+    /* Room for the focus ring, which overflow would clip. */
+    padding: 3px;
+    margin: -3px -3px var(--space-2);
+    scrollbar-width: none;
+  }
+
+  .deck-tab {
+    flex: none;
+    min-height: 2.25rem;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: none;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .deck-tab[aria-selected="true"] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+    color: var(--text);
+  }
+
+  /* On a phone the tab names the panel, so its own title would repeat it. */
+  .deck-title {
+    display: none;
+    margin-bottom: var(--space-2);
+  }
+
+  .deck-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(6.25rem, 1fr));
+    gap: var(--space-2);
+  }
+
+  .command {
+    min-height: var(--control-height);
+    min-width: 0;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+    background: var(--bg-raised);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: border-color var(--quick), background-color var(--quick);
+  }
+
+  .command:hover {
+    border-color: var(--accent);
+  }
+
+  .command[aria-expanded="true"] {
+    border-color: var(--accent);
+    background: var(--accent-tint);
+  }
+
+  .command[data-confirm] {
+    border-color: color-mix(in oklab, var(--danger) 45%, var(--border));
+    color: var(--danger);
+  }
+
+  .command[data-confirm]:hover,
+  .command[data-confirm][aria-expanded="true"] {
+    border-color: var(--danger);
+    background: var(--danger-tint);
+  }
+
+  .command[aria-busy="true"],
+  .target[aria-busy="true"] {
+    opacity: 0.55;
+  }
+
+  /* The picker opens under the grid of the command that needs a target. */
+  .picker {
+    margin-top: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-inset);
+  }
+
+  .picker-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+
+  .picker-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .picker-title code {
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .picker-filter {
+    margin-bottom: var(--space-2);
+  }
+
+  .picker-group + .picker-group {
+    margin-top: var(--space-3);
+  }
+
+  .picker-group-title {
+    margin-bottom: var(--space-1);
+  }
+
+  .picker-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+    gap: var(--space-2);
+  }
+
+  .target {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--control-height);
+    min-width: 0;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+    background: var(--bg-raised);
+    text-align: start;
+    transition: border-color var(--quick);
+  }
+
+  .target:hover {
+    border-color: var(--accent);
+  }
+
+  .target[data-confirm] {
+    border-color: color-mix(in oklab, var(--danger) 45%, var(--border));
+  }
+
+  .target[data-confirm]:hover {
+    border-color: var(--danger);
+  }
+
+  .target-text {
+    display: grid;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  .target-name {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .target-note {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .favicon {
+    width: 1rem;
+    height: 1rem;
+    flex: none;
+    border-radius: 3px;
+  }
+
+  /* Inside the output a favicon sits in a line of text. */
+  .favicon-inline {
+    width: 0.875rem;
+    height: 0.875rem;
+    margin-inline-end: 0.3em;
+    vertical-align: -0.125em;
+  }
+
+  .picker-empty,
+  .deck-note {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .deck-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* ── The session ─────────────────────────────────────────────────────── */
+
+  .log-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 2rem;
+    margin-bottom: var(--space-2);
+  }
+
+  .log-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .log-tools {
+    display: flex;
+    gap: var(--space-1);
+    margin-inline-start: auto;
+  }
+
+  .log-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+
+  .log-empty {
+    padding: var(--space-6) var(--space-4);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  .entry {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    /* The sticky bars would cover an entry scrolled into view otherwise. */
+    scroll-margin-top: calc(var(--topbar-height) + 5rem);
+  }
+
+  .entry-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-inline-end: var(--space-1);
+  }
+
+  .entry-toggle {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    min-height: 2.75rem;
+    padding: 0 var(--space-3);
+    border: 0;
+    border-radius: var(--radius);
+    background: none;
+    text-align: start;
+  }
+
+  .entry-chevron {
+    color: var(--text-muted);
+    transition: transform var(--quick);
+  }
+
+  .entry-toggle[aria-expanded="true"] .entry-chevron {
+    transform: rotate(90deg);
+  }
+
+  .entry-state {
+    display: inline-grid;
+    place-items: center;
+    color: var(--ok);
+  }
+
+  .entry-command {
+    min-width: 0;
+    font-size: 0.875rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .entry-meta {
+    display: flex;
+    gap: var(--space-2);
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .entry-actions {
+    display: flex;
+    flex: none;
+  }
+
+  .entry-body {
+    padding: var(--space-3);
+    border-top: 1px solid var(--border);
+  }
+
+  .entry[data-folded] .entry-body {
+    display: none;
+  }
+
+  .entry-title {
+    margin-bottom: var(--space-2);
+    font-weight: 650;
+  }
+
+  .entry-title:empty {
+    display: none;
+  }
+
+  .entry[data-state="failed"] .entry-state,
+  .entry[data-state="failed"] .entry-title {
+    color: var(--danger);
+  }
+
+  /* While it runs, the state is a ring that turns and there is no output
+     to copy or to run again. */
+  .entry[data-state="running"] .entry-state .icon {
+    display: none;
+  }
+
+  .entry[data-state="running"] .entry-state::before {
+    content: "";
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+  }
+
+  .entry[data-state="running"] .entry-actions {
+    visibility: hidden;
+  }
+
+  .entry[data-state="running"] .entry-output {
+    color: var(--text-muted);
+  }
+
+  /* Plain output keeps its line breaks and wraps. Output drawn with box
+     characters (duf, tables) breaks when it wraps, so it scrolls sideways. */
+  .output {
+    max-height: 70dvh;
+    overflow: auto;
+    font-size: 0.8125rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    scrollbar-width: thin;
+  }
+
+  .output[data-wide] {
+    white-space: pre;
+    overflow-wrap: normal;
+  }
+
+  /* An answer written in Markdown: the help table, mostly. */
+  .prose {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+    font-size: 0.875rem;
+  }
+
+  .prose h3 {
+    font-size: 1rem;
+  }
+
+  .prose h4 {
+    margin-top: var(--space-2);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .prose code {
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    background: var(--bg-inset);
+    font-size: 0.8125rem;
+  }
+
+  .prose ul {
+    padding-inline-start: 1.25rem;
+    list-style: disc;
+  }
+
+  /* A picture in an answer: the map tile of "locate", with its credit
+     under it. It never grows past its own size nor past the entry. */
+  .prose-map {
+    display: inline-grid;
+    gap: var(--space-1);
+  }
+
+  .prose-image {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+  }
+
+  .prose-credit {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
+
+  .prose hr {
+    width: 100%;
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .prose-table {
+    overflow-x: auto;
+  }
+
+  .prose table {
+    border-collapse: collapse;
+  }
+
+  .prose th,
+  .prose td {
+    padding: var(--space-1) var(--space-5) var(--space-1) 0;
+    border-bottom: 1px solid var(--border);
+    text-align: start;
+    vertical-align: top;
+  }
+
+  .prose th {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  /* ── The status bar ──────────────────────────────────────────────────── */
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-weight: 600;
+  }
+
+  .status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--text-muted);
+  }
+
+  .status[data-state="connected"] .status-dot {
+    background: var(--ok);
+  }
+
+  .status[data-state="disabled"] .status-dot,
+  .status[data-state="locked"] .status-dot {
+    background: var(--warn);
+  }
+
+  .status[data-state="disconnected"] {
+    color: var(--danger);
+  }
+
+  .status[data-state="disconnected"] .status-dot {
+    background: var(--danger);
+  }
+
+  .statusbar-facts {
+    display: flex;
+    gap: var(--space-4);
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* ── Dialogs and their fields ────────────────────────────────────────── */
+
+  .dialog {
+    width: min(100% - 2 * var(--space-4), 26rem);
+    padding: var(--space-5);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-large);
+    background: var(--bg-raised);
+    color: var(--text);
+    box-shadow: var(--shadow);
+  }
+
+  .dialog::backdrop {
+    background: rgb(8 12 18 / 0.6);
+    backdrop-filter: blur(3px);
+  }
+
+  .dialog-title {
+    margin-bottom: var(--space-4);
+    font-size: 1.125rem;
+    line-height: 1.25;
+  }
+
+  .dialog-command {
+    margin-bottom: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-small);
+    background: var(--bg-inset);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+
+  .dialog-text {
+    color: var(--text-muted);
+  }
+
+  .dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-5);
+  }
+
+  .dialog-help {
+    display: grid;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border);
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .dialog-help code {
+    color: var(--text);
+  }
+
+  .field-label {
+    display: block;
+    margin-bottom: var(--space-1);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  .field {
+    width: 100%;
+    min-height: 2.75rem;
+    margin-bottom: var(--space-3);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-small);
+    background: var(--bg-inset);
+    /* 16 px, for the same reason as the prompt. */
+    font-size: 1rem;
+  }
+
+  .field-error {
+    margin-bottom: var(--space-3);
+    font-size: 0.875rem;
+    color: var(--danger);
+  }
+
+  /* ── What changes with the width ─────────────────────────────────────── */
+
+  /* The top bar of the smallest phones: tighter, so the name fits whole. */
+  @media (max-width: 22.5rem) {
+    .topbar {
+      gap: var(--space-1);
+      padding-inline: var(--space-2);
+    }
+
+    .topbar-actions {
+      gap: 0;
+    }
+
+    .brand img {
+      width: 1.75rem;
+      height: 1.75rem;
+    }
+  }
+
+  /* On a phone the top bar has room for the icon and the controls, not for
+     the name too: cut to "Gotify Co…" it says less than the icon alone. The
+     name stays in the heading for a screen reader, and in the tab. */
+  @media (max-width: 30rem) {
+    .brand-name {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  }
+
+  /* A narrow phone keeps the state and the count; the rest needs room. */
+  @media (max-width: 30rem) {
+    .statusbar-facts [data-fact="uptime"],
+    .statusbar-facts [data-fact="version"] {
+      display: none;
+    }
+
+    .entry-time {
+      display: none;
+    }
+  }
+
+  /* On a phone one category shows at a time, the one of the chosen tab. The
+     hidden attribute is not used for this: it would also hide the panel on
+     a wide screen, where every category shows. */
+  @media (max-width: 59.99rem) {
+    .deck-panel:not([data-current]) {
+      display: none;
+    }
+  }
+
+  @media (min-width: 60rem) {
+    /* Beside the session there is room for every category at once, so the
+       tabs go and each panel shows under its own title. */
+    .deck-tabs {
+      display: none;
+    }
+
+    .deck-panel + .deck-panel {
+      margin-top: var(--space-4);
+    }
+
+    .deck-title {
+      display: block;
+    }
+
+    .prompt {
+      padding-block-start: var(--space-4);
+    }
+  }
+
+  /* The "/" hint is for a keyboard, and so is the smaller text of the kbd. */
+  @media (hover: hover) and (pointer: fine) {
+    .prompt-key {
+      display: inline-block;
+    }
+
+    .prompt-box:focus-within .prompt-key {
+      display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .entry[data-state="running"] .entry-state::before {
+      animation: turn 0.8s linear infinite;
+    }
+
+    .status[data-state="connected"] .status-dot {
+      animation: beat 2.4s ease-in-out infinite;
+    }
+
+    .entry {
+      animation: arrive 180ms ease-out;
+    }
+  }
+
+  @keyframes turn {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* The one glow of the page, taken from Pulse: the plugin is alive. */
+  @keyframes beat {
+    50% {
+      box-shadow: 0 0 0 4px color-mix(in oklab, var(--ok) 25%, transparent);
+    }
+  }
+
+  @keyframes arrive {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+}
+
+@layer utilities {
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .skip-link {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: 40;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-small);
+    background: var(--accent);
+    color: var(--accent-contrast);
+    font-weight: 600;
+    transform: translateY(-200%);
+  }
+
+  .skip-link:focus {
+    transform: none;
+  }
+
+  .fine-pointer-only {
+    display: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .fine-pointer-only {
+      display: inline;
+    }
+  }
+}

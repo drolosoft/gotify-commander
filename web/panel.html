@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" id="themeColor" content="#1d2835">
+<title>Gotify Commander</title>
+<link rel="icon" type="image/png" href="{{icon}}">
+<link rel="apple-touch-icon" href="{{touch_icon}}">
+<!-- web/panel-boot.js: sets the stored theme before the first paint. -->
+<script nonce="{{nonce}}">
+{{boot}}
+</script>
+<!-- web/panel.css -->
+<style nonce="{{nonce}}">
+{{css}}
+</style>
+</head>
+<body>
+
+<!-- The icons of the page, drawn once and used by reference. -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <symbol id="icon-back" viewBox="0 0 16 16"><polyline points="10,3 5,8 10,13"/></symbol>
+  <symbol id="icon-chevron" viewBox="0 0 16 16"><polyline points="6,3 11,8 6,13"/></symbol>
+  <symbol id="icon-theme-system" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path class="icon-fill" d="M8 2.5a5.5 5.5 0 0 1 0 11z"/></symbol>
+  <symbol id="icon-theme-dark" viewBox="0 0 16 16"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></symbol>
+  <symbol id="icon-theme-light" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.75M8 12.75v1.75M1.5 8h1.75M12.75 8h1.75M3.4 3.4l1.25 1.25M11.35 11.35l1.25 1.25M3.4 12.6l1.25-1.25M11.35 4.65l1.25-1.25"/></symbol>
+  <symbol id="icon-lock" viewBox="0 0 16 16"><rect x="3.5" y="7.5" width="9" height="6" rx="1.5"/><path d="M5.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2"/></symbol>
+  <symbol id="icon-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3.5 10.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h6.5a1 1 0 0 1 1 1v.5"/></symbol>
+  <symbol id="icon-again" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.65"/><polyline points="13.25,2 13.25,5 10.25,5"/></symbol>
+  <symbol id="icon-remove" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+  <symbol id="icon-done" viewBox="0 0 16 16"><polyline points="3,8.5 6.5,12 13,4.5"/></symbol>
+  <symbol id="icon-failed" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.75v4M8 11.2v.05"/></symbol>
+</svg>
+
+<a class="skip-link" href="#prompt">Skip to the command line</a>
+
+<header class="topbar">
+  <a class="icon-button" href="/" aria-label="Back to Gotify" title="Back to Gotify">
+    <svg class="icon" aria-hidden="true"><use href="#icon-back"/></svg>
+  </a>
+  <h1 class="brand">
+    <img src="{{icon}}" width="32" height="32" alt="">
+    <span class="brand-name">Gotify Commander</span>
+  </h1>
+  <div class="topbar-actions">
+    <button type="button" class="icon-button" id="themeButton" aria-label="Theme">
+      <svg class="icon" aria-hidden="true"><use href="#icon-theme-system"/></svg>
+    </button>
+    <!-- The page size, as in Pulse: smaller, the percentage (which goes
+         back to 100 %) and larger. -->
+    <div class="zoom-control" id="zoomControl" role="group" aria-label="Page size">
+      <button type="button" class="zoom-step" data-zoom-step="out" aria-label="Smaller" title="Smaller"><span aria-hidden="true">&minus;</span></button>
+      <button type="button" class="zoom-step zoom-level" id="zoomLevel" data-zoom-step="reset" aria-label="100 %, back to 100 %" title="Back to 100 %">100&nbsp;%</button>
+      <button type="button" class="zoom-step" data-zoom-step="in" aria-label="Larger" title="Larger"><span aria-hidden="true">+</span></button>
+    </div>
+    <button type="button" class="icon-button" id="lockButton" aria-label="Lock the panel" title="Lock the panel">
+      <svg class="icon" aria-hidden="true"><use href="#icon-lock"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="shell">
+
+  <!-- The command line: type a command, or pick one from the deck. -->
+  <form class="prompt" id="promptForm" autocomplete="off">
+    <div class="prompt-box">
+      <label class="prompt-glyph" for="prompt" aria-hidden="true">&#x276F;</label>
+      <input class="prompt-input" id="prompt" name="command" type="text"
+        role="combobox" aria-label="Command" aria-autocomplete="list"
+        aria-expanded="false" aria-controls="suggestions"
+        placeholder="Type a command, such as status"
+        autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      <kbd class="prompt-key" aria-hidden="true">/</kbd>
+    </div>
+    <button type="submit" class="button button-primary" id="runButton">Run</button>
+    <ul class="suggestions" id="suggestions" role="listbox" aria-label="Suggestions" hidden></ul>
+  </form>
+
+  <!-- The deck: every command of the configuration, by category. -->
+  <section class="deck" aria-label="Commands">
+    <div class="deck-tabs" id="deckTabs" role="tablist" aria-label="Command categories"></div>
+    <div id="deckPanels"></div>
+    <p class="deck-note" id="deckNote" hidden>
+      <span id="deckNoteText"></span>
+      <button type="button" class="button button-quiet" id="deckRetry">Try again</button>
+    </p>
+  </section>
+
+  <!-- The session: what was run and what it answered, newest first. -->
+  <section class="log" aria-labelledby="logTitle">
+    <div class="log-head">
+      <h2 class="micro-label" id="logTitle">Session</h2>
+      <span class="log-count" id="logCount"></span>
+      <div class="log-tools">
+        <button type="button" class="button button-quiet" id="foldButton" hidden>Collapse all</button>
+        <button type="button" class="button button-quiet button-danger" id="clearButton" hidden>&#x2715; Clear</button>
+      </div>
+    </div>
+    <ol class="log-list" id="logList"></ol>
+    <p class="log-empty" id="logEmpty">
+      Nothing has run in this session yet. Type a command above
+      <span class="fine-pointer-only">(press <kbd>/</kbd> to get there)</span>
+      or pick one from the commands.
+    </p>
+  </section>
+
+</main>
+
+<footer class="statusbar">
+  <span class="status" id="status" data-state="waiting">
+    <span class="status-dot" aria-hidden="true"></span>
+    <span id="statusText">Connecting</span>
+  </span>
+  <span class="statusbar-facts" id="statusFacts"></span>
+</footer>
+
+<!-- Results are announced here, away from the log that changes. -->
+<div class="visually-hidden" id="announcer" role="status" aria-live="polite"></div>
+
+<!-- One entry of the session. panel.js clones it and fills it in. -->
+<template id="entryTemplate">
+  <li class="entry">
+    <div class="entry-head">
+      <button type="button" class="entry-toggle" aria-expanded="true">
+        <svg class="icon entry-chevron" aria-hidden="true"><use href="#icon-chevron"/></svg>
+        <span class="entry-state"><svg class="icon" aria-hidden="true"><use href="#icon-done"/></svg></span>
+        <span class="entry-glyph" aria-hidden="true">&#x276F;</span>
+        <code class="entry-command"></code>
+      </button>
+      <span class="entry-meta">
+        <span class="entry-duration"></span>
+        <time class="entry-time"></time>
+      </span>
+      <span class="entry-actions">
+        <button type="button" class="icon-button icon-button-small" data-action="copy" aria-label="Copy the output" title="Copy the output">
+          <svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg>
+        </button>
+        <button type="button" class="icon-button icon-button-small" data-action="again" aria-label="Run again" title="Run again">
+          <svg class="icon" aria-hidden="true"><use href="#icon-again"/></svg>
+        </button>
+        <button type="button" class="icon-button icon-button-small" data-action="remove" aria-label="Remove from the session" title="Remove from the session">
+          <svg class="icon" aria-hidden="true"><use href="#icon-remove"/></svg>
+        </button>
+      </span>
+    </div>
+    <div class="entry-body">
+      <p class="entry-title"></p>
+      <div class="entry-output"></div>
+    </div>
+  </li>
+</template>
+
+<!-- Password dialog: the panel API answers only with the control panel password. -->
+<dialog class="dialog" id="authDialog" aria-labelledby="authTitle">
+  <h2 class="dialog-title" id="authTitle">Control panel password</h2>
+  <form id="authForm">
+    <label class="field-label" for="authPassword">Password</label>
+    <input class="field" id="authPassword" name="password" type="password" required
+      autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <p class="field-error" id="authError" role="alert" hidden></p>
+    <button type="submit" class="button button-primary button-wide">Unlock</button>
+  </form>
+  <div class="dialog-help">
+    <p>Find it in Gotify under <strong>Plugins &rarr; Gotify Commander</strong>, in the
+      <em>Control panel password</em> section. It is generated the first time the plugin is
+      enabled and stays the same after restarts.</p>
+    <p>To use your own, set <code>web_password</code> in the plugin configuration. Empty it
+      again to go back to the generated one.</p>
+    <p>This tab keeps the password until you close it, or until you lock the panel with the
+      padlock in the header.</p>
+    <p>The session is kept in this browser for 24 hours. The <strong>&#x2715; Clear</strong>
+      button above it removes it now.</p>
+  </div>
+</dialog>
+
+<!-- Confirmation dialog: asked before a command marked as dangerous. -->
+<dialog class="dialog" id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+  <h2 class="dialog-title" id="confirmTitle">Run this command?</h2>
+  <p class="dialog-command"><span class="entry-glyph" aria-hidden="true">&#x276F;</span> <code id="confirmCommand"></code></p>
+  <p class="dialog-text" id="confirmText">The configuration asks for a confirmation before this
+    command. It runs as soon as you confirm.</p>
+  <div class="dialog-actions">
+    <button type="button" class="button" id="confirmCancel">Cancel</button>
+    <button type="button" class="button button-danger-solid" id="confirmRun">Run it</button>
+  </div>
+</dialog>
+
+<!-- web/panel.js -->
+<script nonce="{{nonce}}">
+{{js}}
+</script>
+</body>
+</html>
