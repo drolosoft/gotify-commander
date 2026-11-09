@@ -36,7 +36,7 @@ Who can make the plugin run a command:
    plugin is a stub that shows a notice and registers nothing.
 
 Commands run with the permissions of the Gotify process plus the `sudo` rules
-you grant it. Only the 23 registered commands can run, and service names are
+you grant it. Only the 27 registered commands can run, and service names are
 validated against a whitelist.
 
 Arguments are never joined into a shell string. The one fixed shell script in
