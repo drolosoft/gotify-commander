@@ -63,7 +63,8 @@ The panel asks in a dialog, with **Cancel** focused, before:
 - **Theme**: system, dark, light. The page follows the system until you pick
   one.
 - **Page size**: smaller, the percentage (which goes back to 100 %) and
-  larger, from 50 % to 125 %.
+  larger, from 50 % to 125 %. The top bar itself does not change, so the
+  buttons stay where they are, and the content keeps the window's width.
 - **Padlock**: forgets the password and asks for it again, for a screen you
   share.
 
@@ -190,8 +191,22 @@ Every colour is a role in `panel.css` (`--bg`, `--text`, `--accent`,
 the system theme needs no script. Each text colour was measured at 4.5:1 or
 more against the surfaces it sits on; measure again when you change one.
 
-Every size is in `rem`. The page size control sets the `font-size` of
-`<html>`, and the whole page follows.
+Every size of the content is in `rem`. The page size control sets the
+`font-size` of `<html>` through one factor, `--zoom`, and the content
+follows.
+
+Two things must not follow it, and they are sized in `--unit`, the `rem` of
+the page at 100 %:
+
+- **The top bar** and everything in it. Its buttons are what changes the
+  size; sized in `rem` they would move at every click and the next click
+  would land somewhere else.
+- **The width the content may take.** Smaller text is for seeing more in the
+  same window, not the same in a narrower column.
+
+A new control in the top bar uses `calc(var(--unit) * N)`, never `rem` nor
+the `--space-*` tokens. Rules that override a component inside the top bar
+go in the `components` layer: a later layer wins whatever the selector.
 
 ### Adding a command
 

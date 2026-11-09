@@ -39,7 +39,9 @@ All notable changes to gotify-commander. The format follows
   again.
 - A page size control in the panel's header: smaller, the percentage (which
   goes back to 100 %) and larger, from 50 % to 125 %. The browser remembers
-  the size.
+  the size. The top bar keeps its own size and place at every step, so the
+  buttons stay under the pointer, and the content keeps the width of the
+  window: smaller text shows more, it does not narrow the page.
 - `GET /config` lists the commands that are enabled, with their usage, what
   they take and whether the panel asks before running them, and the allowed
   containers. `POST /execute` says when its answer is Markdown, and

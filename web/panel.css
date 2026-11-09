@@ -88,7 +88,7 @@
     --radius-large: 14px;
 
     /* The two bars are sticky, and what sticks under them needs their size. */
-    --topbar-height: 3.25rem;
+    --topbar-height: calc(var(--unit) * 3.25);
     --statusbar-height: 2.25rem;
 
     /* A finger needs 44 px; a mouse is fine with less (see "fine pointer"). */
@@ -112,37 +112,52 @@
   }
 
   /* The page size of the top bar's control, as Pulse does it: <html
-     data-zoom> is the font-size of the page, and since every size here is
-     in rem the whole panel follows. 100 % has no rule. The zoom property is
-     not used: it would also scale the 1 px borders and the media queries'
-     arithmetic. Media queries keep reading the window, so the layout
-     changes at the same widths whatever the size. */
+     data-zoom> picks a factor, the factor is the font-size of the page, and
+     since every size of the content is in rem the content follows. 100 %
+     has no rule. The zoom property is not used: it would also scale the
+     1 px borders and the media queries' arithmetic. Media queries keep
+     reading the window, so the layout changes at the same widths whatever
+     the size.
+
+     Two things must not follow the page size, and --unit is for them: it is
+     the rem of the page at 100 %, whatever the factor.
+
+     - The top bar. Its buttons are what changes the size, so if they moved
+       with it the next click would land somewhere else.
+     - The width the content may take. Smaller text is for seeing more in
+       the same window, not the same in a narrower column. */
+  :root {
+    --zoom: 1;
+    --unit: calc(1rem / var(--zoom));
+    font-size: calc(100% * var(--zoom));
+  }
+
   :root[data-zoom="50"] {
-    font-size: 50%;
+    --zoom: 0.5;
   }
 
   :root[data-zoom="60"] {
-    font-size: 60%;
+    --zoom: 0.6;
   }
 
   :root[data-zoom="70"] {
-    font-size: 70%;
+    --zoom: 0.7;
   }
 
   :root[data-zoom="80"] {
-    font-size: 80%;
+    --zoom: 0.8;
   }
 
   :root[data-zoom="90"] {
-    font-size: 90%;
+    --zoom: 0.9;
   }
 
   :root[data-zoom="110"] {
-    font-size: 110%;
+    --zoom: 1.1;
   }
 
   :root[data-zoom="125"] {
-    font-size: 125%;
+    --zoom: 1.25;
   }
 }
 
@@ -204,16 +219,19 @@
     z-index: 30;
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    /* Every size of the top bar and of what is in it is in --unit, not in
+       rem: see the note beside --unit. */
+    gap: calc(var(--unit) * 0.5);
     height: var(--topbar-height);
-    padding-inline: max(var(--space-3), env(safe-area-inset-left)) max(var(--space-3), env(safe-area-inset-right));
+    padding-inline: max(calc(var(--unit) * 0.75), env(safe-area-inset-left)) max(calc(var(--unit) * 0.75), env(safe-area-inset-right));
     background: var(--bg-raised);
     border-bottom: 1px solid var(--border);
+    font-size: calc(var(--unit) * 0.9375);
   }
 
   .topbar-actions {
     display: flex;
-    gap: var(--space-1);
+    gap: calc(var(--unit) * 0.25);
     margin-inline-start: auto;
   }
 
@@ -223,7 +241,7 @@
     grid-template-columns: minmax(0, 1fr);
     align-content: start;
     gap: var(--space-4);
-    width: min(100% - 2 * var(--space-3), 84rem);
+    width: min(100% - 2 * var(--space-3), var(--unit) * 120);
     margin-inline: auto;
     padding-block: var(--space-3) var(--space-6);
   }
@@ -238,7 +256,7 @@
         "deck log";
       grid-template-rows: auto 1fr;
       column-gap: var(--space-5);
-      width: min(100% - 2 * var(--space-5), 84rem);
+      width: min(100% - 2 * var(--space-5), var(--unit) * 120);
       /* The space above comes from the prompt and the deck themselves, so
          it is still there when they stick under the top bar. */
       padding-block-start: 0;
@@ -316,19 +334,18 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: calc(var(--unit) * 0.5);
     min-width: 0;
-    font-size: 1rem;
+    font-size: var(--unit);
     font-weight: 650;
     letter-spacing: -0.01em;
     white-space: nowrap;
   }
 
-  /* Sized in rem, so the icon follows the page size like the name does. */
   .brand img {
     flex: none;
-    width: 2rem;
-    height: 2rem;
+    width: calc(var(--unit) * 2);
+    height: calc(var(--unit) * 2);
   }
 
   .brand-name {
@@ -420,6 +437,20 @@
     height: 2rem;
   }
 
+  /* In the top bar the buttons and their icons keep their size whatever the
+     page size (see --unit). These two rules are here and not beside .topbar
+     because a later layer wins over an earlier one whatever the selector:
+     in the layout layer they would lose to .icon-button above. */
+  .topbar .icon-button {
+    width: calc(var(--unit) * 2.5);
+    height: calc(var(--unit) * 2.5);
+  }
+
+  .topbar .icon {
+    width: var(--unit);
+    height: var(--unit);
+  }
+
   /* ── The page size ───────────────────────────────────────────────────── */
 
   .zoom-control {
@@ -432,8 +463,8 @@
   .zoom-step {
     display: inline-grid;
     place-items: center;
-    min-width: 1.75rem;
-    height: 2.5rem;
+    min-width: calc(var(--unit) * 1.75);
+    height: calc(var(--unit) * 2.5);
     padding: 0;
     border: 1px solid transparent;
     border-radius: var(--radius-small);
@@ -450,9 +481,9 @@
   /* The current size, in monospace; a fixed width keeps the two signs
      still while the number changes. */
   .zoom-level {
-    min-width: 3.25rem;
+    min-width: calc(var(--unit) * 3.25);
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: calc(var(--unit) * 0.75);
     font-variant-numeric: tabular-nums;
     color: var(--text);
     white-space: nowrap;
@@ -1175,8 +1206,8 @@
   /* The top bar of the smallest phones: tighter, so the name fits whole. */
   @media (max-width: 22.5rem) {
     .topbar {
-      gap: var(--space-1);
-      padding-inline: var(--space-2);
+      gap: calc(var(--unit) * 0.25);
+      padding-inline: calc(var(--unit) * 0.5);
     }
 
     .topbar-actions {
@@ -1184,8 +1215,8 @@
     }
 
     .brand img {
-      width: 1.75rem;
-      height: 1.75rem;
+      width: calc(var(--unit) * 1.75);
+      height: calc(var(--unit) * 1.75);
     }
   }
 

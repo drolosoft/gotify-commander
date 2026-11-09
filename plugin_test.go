@@ -918,6 +918,9 @@ func TestCommandUIHistoryExpires(t *testing.T) {
 	}
 }
 
+// cssCommentPattern matches a comment of a stylesheet.
+var cssCommentPattern = regexp.MustCompile(`(?s)/\*.*?\*/`)
+
 // zoomStepsPattern reads the list of zoom steps from the page's script.
 var zoomStepsPattern = regexp.MustCompile(`const ZOOM_STEPS = \[([0-9, ]+)\];`)
 
@@ -955,6 +958,20 @@ func TestCommandUIZoomStepsAgree(t *testing.T) {
 	}
 	if !strings.Contains(panelHTML, `id="zoomControl"`) {
 		t.Errorf("web/panel.html has no zoom control")
+	}
+
+	// The top bar holds the buttons that change the size, so it is sized in
+	// --unit, the rem of the page at 100 %: sized in rem, the buttons would
+	// move under the pointer at every click.
+	if !strings.Contains(panelCSS, "--unit: calc(1rem / var(--zoom));") {
+		t.Errorf("web/panel.css does not define --unit from the zoom factor")
+	}
+	topbar := panelCSS[strings.Index(panelCSS, "  .topbar {"):]
+	topbar = topbar[:strings.Index(topbar, "}")]
+	// The comment inside the rule names the unit it avoids.
+	topbar = cssCommentPattern.ReplaceAllString(topbar, "")
+	if strings.Contains(topbar, "rem") || strings.Contains(topbar, "var(--space-") {
+		t.Errorf("the .topbar rule has a size that follows the page size:\n%s", topbar)
 	}
 }
 
